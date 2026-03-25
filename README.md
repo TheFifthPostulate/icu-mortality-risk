@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This project develops interpretable mortality risk models using ICU electronic health record (EHR) data from the MIMIC-IV database. Instead of using black-box models alone, the approach constructs a population-relative probabilistic risk score and decomposes patient risk into physiologic components. Survival analysis is then used to model time-to-event risk. The project demonstrates skills in clinical data extraction, data harmonization, statistical modeling, machine learning, and survival analysis using real-world healthcare data.  
+This project develops interpretable mortality risk models using ICU electronic health record (EHR) data from the MIMIC-IV database. Instead of using black-box models alone, the approach constructs a population-relative probabilistic risk score and decomposes patient risk into physiologic components. Survival analysis is then used to model time-to-event risk. The project demonstrates skills in clinical data extraction, data harmonization, statistical modeling, machine learning, survival analysis using real-world healthcare data, and AI-assisted development and prototyping.  
   
 The project combines probabilistic modeling, machine learning, and survival analysis to study how mortality risk evolves after the first 24 hours of ICU admission and compares the approach against established ICU severity scores.  
 
@@ -44,6 +44,7 @@ Methods used:
 - Machine learning (Random Forest)
 - Survival analysis (Kaplan–Meier, Cox proportional hazards)
 - Risk stratification and calibration analysis
+- AI/LLM-assisted rapid protyping and documentation
 
 ## Key Results
 
