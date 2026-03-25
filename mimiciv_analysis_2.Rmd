@@ -1,0 +1,2673 @@
+---
+output: 
+  html_document
+---
+
+```{r, message=FALSE}
+
+library(here)
+library(tibble)
+library(ranger)
+library(caret)
+library(ggplot2)
+library(pROC)
+
+source(here("v2","src","evidencegeom.R"))
+
+library(stringr)
+library(survival)
+library(survminer)
+library(timeROC)
+library(rms)
+library(dplyr)
+
+set.seed(42)
+
+
+```
+
+## MIMIC-IV : ICU mortality 24h feature aggregation
+
+This dataset contains 24h feature aggregates of multiple measurements from the mimiciv_3_1_derived.vitalsign, chemistry, complete_blood_count, and bg tables. The following aggregations were computed during data extraction: # of measurements, measurement missing indicator, min, max, mean, median, IQR, early mean (before 12h), late mean (after 12h), # occurrences below safe lower bound for measurement, # occurrences above safe upper bound for measurement, # in low/med/high bins. In this notebook, we also compute measurement entropy using counts in low/med/high bins, fraction of occurrences below safe lower bound, and fraction of occurrences above safe upper bound.
+
+
+
+```{r}
+
+mimiciv_import <- read.csv(here("v2","src","data","mimiciv","mimiciv_ext_24h_features_wide_2.csv"))
+
+```
+
+
+```{r}
+
+mimiciv_import$mortality <- as.factor(mimiciv_import$mortality)
+
+```
+
+```{r}
+
+mimiciv_import$gender <- as.factor(mimiciv_import$gender)
+
+```
+
+
+```{r}
+
+
+
+# -----------------------------------
+# 1) entropy from *_bin_low/_normal/_high
+# 2) *_missing -> factor
+# 3) *_low_count / *_high_count -> fractions
+# -----------------------------------
+
+safe_entropy3 <- function(low, mid, high, eps = 1e-12) {
+  total <- low + mid + high
+  
+  out <- rep(NA_real_, length(total))
+  ok <- is.finite(total) & total > 0
+  
+  if (any(ok)) {
+    p1 <- low[ok]  / total[ok]
+    p2 <- mid[ok]  / total[ok]
+    p3 <- high[ok] / total[ok]
+    
+    P <- cbind(p1, p2, p3)
+    P[P <= 0 | !is.finite(P)] <- eps
+    
+    out[ok] <- -rowSums(P * log(P))
+  }
+  
+  out
+}
+
+add_entropy_missing_frac <- function(df) {
+  
+  nms <- names(df)
+  
+  # -----------------------------
+  # 1) entropy from bin counts
+  # expects columns like:
+  #   heart_rate_bin_low
+  #   heart_rate_bin_normal
+  #   heart_rate_bin_high
+  # -----------------------------
+  bin_low_cols <- nms[str_detect(nms, "_bin_low$")]
+  
+  for (low_col in bin_low_cols) {
+    stem <- str_remove(low_col, "_bin_low$")
+    mid_col  <- paste0(stem, "_bin_normal")
+    high_col <- paste0(stem, "_bin_high")
+    
+    if (mid_col %in% names(df) && high_col %in% names(df)) {
+      ent_col <- paste0(stem, "_entropy")
+      df[[ent_col]] <- safe_entropy3(
+        low  = df[[low_col]],
+        mid  = df[[mid_col]],
+        high = df[[high_col]]
+      )
+    }
+  }
+  
+  # -----------------------------
+  # 2) convert *_missing to factor
+  # -----------------------------
+  missing_cols <- nms[str_detect(nms, "_missing$")]
+  
+  if (length(missing_cols) > 0) {
+    df <- df %>%
+      mutate(across(all_of(missing_cols), ~ factor(.x, levels = c(0, 1))))
+  }
+  
+  # -----------------------------
+  # 3) low/high count fractions
+  # denominator = corresponding *_count
+  # examples:
+  #   heart_rate_low_count / heart_rate_count
+  #   heart_rate_high_count / heart_rate_count
+  # -----------------------------
+  low_count_cols  <- names(df)[str_detect(names(df), "_low_count$")]
+  high_count_cols <- names(df)[str_detect(names(df), "_high_count$")]
+  
+  make_frac <- function(count_vec, denom_vec) {
+    out <- rep(NA_real_, length(count_vec))
+    ok <- is.finite(denom_vec) & denom_vec > 0 & is.finite(count_vec)
+    out[ok] <- count_vec[ok] / denom_vec[ok]
+    out
+  }
+  
+  for (col in low_count_cols) {
+    stem <- str_remove(col, "_low_count$")
+    denom_col <- paste0(stem, "_count")
+    frac_col  <- paste0(stem, "_low_frac")
+    
+    if (denom_col %in% names(df)) {
+      df[[frac_col]] <- make_frac(df[[col]], df[[denom_col]])
+    }
+  }
+  
+  for (col in high_count_cols) {
+    stem <- str_remove(col, "_high_count$")
+    denom_col <- paste0(stem, "_count")
+    frac_col  <- paste0(stem, "_high_frac")
+    
+    if (denom_col %in% names(df)) {
+      df[[frac_col]] <- make_frac(df[[col]], df[[denom_col]])
+    }
+  }
+  
+  df
+}
+
+```
+
+
+
+```{r}
+
+mimiciv_import <- add_entropy_missing_frac(mimiciv_import)
+
+```
+
+```{r}
+
+drop_bin_cols <- names(mimiciv_import)[str_detect(names(mimiciv_import), "_bin_(low|normal|high)$")]
+mimic_clean <- mimiciv_import %>% dplyr::select(-all_of(drop_bin_cols))
+
+```
+
+
+```{r}
+
+mimic_clean <- mimic_clean%>%select(-all_of(c("spo2_high_count","spo2_high_frac")))
+
+```
+
+
+## Train-Val-Test Split
+
+```{r}
+
+mimic_clean_train_idx <- caret::createDataPartition(mimic_clean$mortality, p=0.5, list=FALSE)
+mimic_clean_train <- mimic_clean[mimic_clean_train_idx, ]
+mimic_clean_eval <- mimic_clean[-mimic_clean_train_idx, ]
+
+mimic_clean_val_idx <- createDataPartition(mimic_clean_eval$mortality, p=0.5, list=FALSE)
+mimic_clean_val <- mimic_clean_eval[mimic_clean_val_idx, ]
+mimic_clean_test <- mimic_clean_eval[-mimic_clean_val_idx, ]
+
+```
+
+
+## Evidence Geometry - Validation Set
+
+### Fit Marginal Likelihood models on Training set
+
+```{r}
+
+alpha <- (nrow(mimic_clean_train[mimic_clean_train$mortality=="1", ])/nrow(mimic_clean_train))
+
+```
+
+
+```{r}
+
+spec <- risk_spec(
+   y_col="mortality", positive="1",
+   features = setdiff(names(mimic_clean_train), c("mortality", "stay_id")),
+   alpha = alpha,
+   laplace = 1, ridge = 1e-3, winsor_p=0.01,
+   weights=FALSE,
+   weight_method = "mutual_info",
+   numeric_candidates = c("gaussian", "lognormal", "gamma"),
+   count_candidates = c("poisson", "negbinom"),
+   fraction_candidates = c("logit_gaussian"),
+   fraction_eps = 1e-3,
+   numeric_val_frac = 0.2,
+   numeric_min_n = 25,
+   llr_cap_quantile = 0.01,
+   mi_nbins = 10
+ )
+
+obj <- fit(mimic_clean_train%>%dplyr::select(-stay_id), spec, k_eigen=4, k_energy=4, energy_ref="both")
+
+
+```
+
+### Compute Log-Likelihood Ratio (LLR) Matrix for Validation Set. Compute geometric risk signals
+
+```{r}
+
+Lval <- loglik_matrices(mimic_clean_val%>%dplyr::select(-stay_id), obj$fit, alpha=spec$alpha)
+# val/test scoring
+scores_val <- bind_cols(stay_id=mimic_clean_val$stay_id, 
+                            mortality=mimic_clean_val$mortality, 
+                            score_risk(Lval$l_pos, Lval$l_neg,  obj$fit$weights, obj$geom, 
+                                       spec$alpha, spec$eps))
+
+
+```
+
+### Train Random Forest on Train Set
+
+```{r}
+
+rf_train_1 <- ranger(formula = mortality ~ ., data=mimic_clean_train%>%dplyr::select(-stay_id),
+                         mtry=10, min.node.size=7, num.trees=500, probability = TRUE,
+                         keep.inbag = TRUE)
+
+```
+
+### Append RF predictions on Validation set to geometric risk dataframe
+
+```{r}
+
+scores_val <- bind_cols(scores_val,
+                            p = predict(rf_train_1, mimic_clean_val%>%dplyr::select(-stay_id, -mortality))$predictions[,"1"])
+
+```
+
+
+### Check assigned marginal likelihood families and compare parameters against population statistics
+
+```{r}
+
+
+feature_sanity_check <- function(df_val,
+                                 L_val,
+                                 y_col,
+                                 positive_label = "1",
+                                 feature_type_summary = NULL) {
+  y <- as.character(df_val[[y_col]])
+  feats <- intersect(colnames(L_val), setdiff(names(df_val), y_col))
+  
+  get_auc <- function(response, predictor) {
+    ok <- is.finite(predictor) & !is.na(response)
+    if (sum(ok) < 20) return(NA_real_)
+    rr <- tryCatch(
+      pROC::roc(response = response[ok], predictor = predictor[ok], quiet = TRUE),
+      error = function(e) NULL
+    )
+    if (is.null(rr)) return(NA_real_)
+    as.numeric(rr$auc)
+  }
+  
+  safe_mode <- function(x) {
+    x <- x[!is.na(x)]
+    if (length(x) == 0) return(NA_character_)
+    tab <- sort(table(x), decreasing = TRUE)
+    names(tab)[1]
+  }
+  
+  out <- lapply(feats, function(f) {
+    x <- df_val[[f]]
+    l <- L_val[, f]
+    
+    pos_idx <- y == positive_label
+    neg_idx <- y != positive_label
+    
+    is_num <- is.numeric(x) || is.integer(x)
+    
+    if (is_num) {
+      raw_mean_pos   <- mean(x[pos_idx], na.rm = TRUE)
+      raw_mean_neg   <- mean(x[neg_idx], na.rm = TRUE)
+      raw_median_pos <- median(x[pos_idx], na.rm = TRUE)
+      raw_median_neg <- median(x[neg_idx], na.rm = TRUE)
+      raw_auc        <- get_auc(y, as.numeric(x))
+      raw_dir        <- sign(raw_mean_pos - raw_mean_neg)
+      raw_mode_pos   <- NA_character_
+      raw_mode_neg   <- NA_character_
+    } else {
+      raw_mean_pos   <- NA_real_
+      raw_mean_neg   <- NA_real_
+      raw_median_pos <- NA_real_
+      raw_median_neg <- NA_real_
+      raw_auc        <- NA_real_
+      raw_dir        <- NA_real_
+      raw_mode_pos   <- safe_mode(as.character(x[pos_idx]))
+      raw_mode_neg   <- safe_mode(as.character(x[neg_idx]))
+    }
+    
+    llr_mean_pos <- mean(l[pos_idx], na.rm = TRUE)
+    llr_mean_neg <- mean(l[neg_idx], na.rm = TRUE)
+    llr_auc      <- get_auc(y, as.numeric(l))
+    llr_dir      <- sign(llr_mean_pos - llr_mean_neg)
+    
+    data.frame(
+      feature = f,
+      raw_type = class(x)[1],
+      raw_mean_pos = raw_mean_pos,
+      raw_mean_neg = raw_mean_neg,
+      raw_median_pos = raw_median_pos,
+      raw_median_neg = raw_median_neg,
+      raw_mode_pos = raw_mode_pos,
+      raw_mode_neg = raw_mode_neg,
+      raw_auc = raw_auc,
+      llr_mean_pos = llr_mean_pos,
+      llr_mean_neg = llr_mean_neg,
+      llr_auc = llr_auc,
+      raw_dir = raw_dir,
+      llr_dir = llr_dir,
+      direction_agrees = ifelse(is.na(raw_dir) | is.na(llr_dir), NA, raw_dir == llr_dir),
+      llr_minus_raw_auc = llr_auc - raw_auc,
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  out <- bind_rows(out)
+  
+  if (!is.null(feature_type_summary)) {
+    out <- left_join(out, feature_type_summary, by = "feature")
+  }
+  
+  out %>%
+    mutate(
+      suspicious = case_when(
+        !is.na(direction_agrees) & !direction_agrees ~ "direction_mismatch",
+        !is.na(raw_auc) & !is.na(llr_auc) & raw_auc < 0.55 & llr_auc > 0.75 ~ "llr_much_stronger_than_raw",
+        !is.na(raw_auc) & !is.na(llr_auc) & raw_auc > 0.70 & llr_auc < 0.60 ~ "llr_weaker_than_raw",
+        TRUE ~ ""
+      )
+    ) %>%
+    arrange(desc(llr_auc))
+}
+```
+
+```{r}
+
+sanity_tbl <- feature_sanity_check(mimic_clean_val, L_val=Lval$L, y_col="mortality", positive_label = "1", feature_type_summary = NULL)
+
+```
+
+```{r}
+
+likelihood_tbl <- print_feature_likelihoods(obj)
+
+```
+
+
+```{r}
+
+check_tbl <- left_join(likelihood_tbl, sanity_tbl, by=join_by(feature))%>%
+  dplyr::select(feature, raw_auc, llr_auc, class, likelihood_family, raw_median_pos, raw_median_neg, parameters)
+
+```
+
+```{r}
+
+
+check_tbl
+
+```
+
+
+### Basic Plots
+
+1. Density of sum of marginal LLRs versus class  
+2. Density of d_dist versus class  
+3. Density of proj versus class  
+4. RF p versus sum of marginal LLRs by class  
+5. Logit transform of RF p versus sum of marginal LLRs  
+6. RF p versus d_dist by class  
+7. RF p versus proj by class  
+8. proj versus d_dist by class  
+9. proj versus d_dist in -4 < d_dist < 4 region  
+
+```{r}
+
+ggplot(scores_val) +
+  geom_density(aes(x=p, fill=mortality), alpha=0.6) +
+  xlab("Random Forest probability of mortality") +
+  theme_minimal()
+
+ggplot(scores_val) +
+  geom_density(aes(x=l, fill=mortality), alpha=0.6) +
+  xlab("Sum of relative marginal evidence from all features") +
+  theme_minimal()
+
+ggplot(scores_val) +
+  geom_density(aes(x=d_dist, fill=mortality), alpha=0.6) +
+  xlab("d_dist") +
+  theme_minimal()
+
+ggplot(scores_val) +
+  geom_density(aes(x=proj, fill=mortality), alpha=0.6) +
+  xlab("proj") +
+  theme_minimal()
+
+ggplot(scores_val) +
+  geom_point(aes(x=l, y=p, color=mortality), alpha=0.4) +
+  ylab("Random forest mortality probability (p)") +
+  theme_minimal()
+
+ggplot(scores_val) +
+  geom_point(aes(x=qlogis(p), y=l, color=mortality), alpha=0.4) +
+  xlab("log-odds of random forest mortality probability (p)") +
+  theme_minimal()
+
+ggplot(scores_val) +
+  geom_point(aes(x=p, y=d_dist, color=mortality), alpha=0.4) +
+  xlab("Random forest mortality probability (p)") +
+  theme_minimal()
+
+ggplot(scores_val) +
+  geom_point(aes(x=p, y=proj, color=mortality), alpha=0.4) +
+  xlab("Random forest mortality probability (p)") +
+  theme_minimal()
+
+ggplot(scores_val) +
+  geom_point(aes(x=d_dist, y=proj, color=mortality), alpha=0.4) +
+  theme_minimal()
+
+ggplot(scores_val%>%filter(d_dist > -4, d_dist < 4)) +
+  geom_point(aes(x=d_dist, y=proj, color=mortality), alpha=0.4) +
+  theme_minimal()
+
+
+
+
+```
+
+
+### Count and Mortality Rate Table for d_dist=0, proj=0
+
+```{r}
+
+scores_val %>%
+  mutate(region = case_when(
+    proj <=0 & d_dist<0 ~ "A",
+    proj <=0 & d_dist>=0 ~ "B",
+    proj >0 & d_dist<0 ~ "C",
+    proj >0 & d_dist>=0 ~ "D"
+  )) %>%
+  group_by(region) %>%
+  summarise(
+    mortality_rate = mean(mortality=="1"),
+    n=n()
+  )
+
+```
+
+### Mortality rate in d_dist < 0 region
+
+```{r}
+
+val_lowrisk <- scores_val%>%filter(d_dist < 0)
+
+```
+
+```{r}
+
+nrow(val_lowrisk%>%filter(mortality=="1")) / nrow(val_lowrisk)
+
+```
+
+
+### Survived cases in d_dist < 0 as a fraction of total survived cases
+
+```{r}
+
+nrow(val_lowrisk%>%filter(mortality=="0")) / nrow(scores_val%>%filter(mortality=="0"))
+
+```
+
+### Correlation between RF p, d_dist, proj
+
+```{r}
+
+cor(scores_val$p, scores_val$d_dist)
+cor(scores_val$p, scores_val$proj)
+
+```
+
+
+### AUC-ROC of RF p, d_dist, proj
+
+```{r}
+
+
+pROC::roc(scores_val$mortality, scores_val$p)
+
+pROC::roc(scores_val$mortality, scores_val$d_dist)
+
+pROC::roc(scores_val$mortality, scores_val$proj)
+
+```
+
+### Mortality Rate and case counts for binned d_dist
+
+```{r}
+
+scores_val %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(d_dist_bin = cut(d_dist, breaks = seq(0, 20, by = 1))) %>% group_by(d_dist_bin) %>% dplyr::summarize(count = n(), mortality_rate = mean(mortality == "1"))
+
+
+scores_val %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(d_dist_bin = cut(d_dist, breaks = seq(0, 20, by = 1))) %>%
+  group_by(d_dist_bin) %>%
+  summarise(
+    mortality_rate = mean(mortality=="1")
+  ) %>% ggplot(aes(x=d_dist_bin, y=mortality_rate, group = 1)) + geom_point() + geom_line() + theme_minimal()
+
+
+```
+
+### Cases with $d_{dist} \geq 2$ as a fraction of all cases with non-negative d_dist
+
+```{r}
+
+nrow(scores_val%>%filter(d_dist >= 2)) / nrow(scores_val%>%filter(d_dist >= 0))
+
+```
+
+### RF p vs mortality rate
+
+```{r}
+
+scores_val %>% mutate(p_bin = cut(p, breaks = 25)) %>% group_by(p_bin) %>% dplyr::summarize(count = n(), mortality_rate = mean(mortality == "1"))
+
+
+scores_val %>% mutate(p_bin = cut(p, breaks = 25)) %>%
+  group_by(p_bin) %>%
+  summarise(
+    mortality_rate = mean(mortality=="1")
+  ) %>% ggplot(aes(x=p_bin, y=mortality_rate, group = 1)) + geom_point() + geom_line() + theme_minimal()
+
+
+```
+
+
+### Obtain LLR matrix and geometric risk signals for Training Set to calculate **marginal median and IQR for d_dist < 0 region**
+
+```{r}
+
+Ltrain <- loglik_matrices(mimic_clean_train%>%dplyr::select(-stay_id), obj$fit, alpha=spec$alpha)
+
+scores_train <- bind_cols(stay_id=mimic_clean_train$stay_id, 
+                            mortality=mimic_clean_train$mortality, 
+                            score_risk(Ltrain$l_pos, Ltrain$l_neg,  obj$fit$weights, obj$geom, 
+                                       spec$alpha, spec$eps))
+
+```
+
+
+### Calculate Positive LLR sums - overall and feature group-wise
+
+All aggregated statistics for every measurement are group together as one feature group.  
+
+#### Triage Rules  
+
+**1. Primary Triage using $d_{dist}$**  
+
+$d_{dist} < 0$ -> **Low Risk**  
+$0 \leq d_{dist} < 2$ -> **Ambiguous/Moderate Risk**  
+$d_{dist} \geq 2$ -> **High Risk**  
+  
+**2. Positive Evidence Scoring**  
+  
+$S_i = \sum_{j=1}^{p} \max(LLR_{ij}, 0)$  
+
+$S_{\text{stable}} = \{ S_i \mid d_{dist,i} < 0 \}$  
+  
+$z_i = \frac{S_i - \operatorname{Median}(S_{\text{stable}})}{\operatorname{IQR}(S_{\text{stable}})\sqrt{p}}$  
+
+In words, $z$ = Positive LLR sum relative to $d_{dist} < 0$ region scaled by sqrt(# features)  
+  
+$z < 0$ -> **Weak Positive Evidence**  
+$0 \leq z < 2$ -> **Moderate Positive Evidence**  
+$z \geq 2$ -> **Strong Positive Evidence**  
+  
+**3. Feature group contributions to positive evidence**  
+  
+Calculate feature group-wise raw positive LLR sums and compute **percentage** over total raw positive LLR sum  
+  
+```{r}
+
+extract_signal_family <- function(feature_names) {
+  feature_names %>%
+    str_remove("_(mean|median|max|min|iqr|sd|early_mean|late_mean)$") %>%
+    str_remove("_(count|missing|low_count|high_count|low_frac|high_frac)$") %>%
+    str_remove("_(bin_low|bin_normal|bin_high)$") %>%
+    str_remove("_entropy$")
+}
+
+extract_L_matrix <- function(x) {
+  if (is.matrix(x) || is.data.frame(x)) {
+    return(as.matrix(x))
+  }
+  if (is.list(x) && !is.null(x$L)) {
+    return(as.matrix(x$L))
+  }
+  stop("Input must be either an LLR matrix or a loglik_matrices() object containing $L.")
+}
+
+# ------------------------------------------------------------
+# Compute overall positive evidence and family-level evidence
+# ------------------------------------------------------------
+compute_positive_llr_scores <- function(L,
+                                        normalize_family = TRUE,
+                                        normalize_overall = TRUE,
+                                        family_map = NULL,
+                                        eps = 1e-12) {
+  L <- as.matrix(L)
+  Lpos <- pmax(L, 0)
+  
+  p <- ncol(Lpos)
+  
+  # overall positive evidence
+  pos_sum_raw <- rowSums(Lpos, na.rm = TRUE)
+  pos_sum <- if (normalize_overall) pos_sum_raw / sqrt(p) else pos_sum_raw
+  
+  # family map
+  if (is.null(family_map)) {
+    fam <- extract_signal_family(colnames(L))
+    family_map <- split(colnames(L), fam)
+  } else {
+    needed <- unique(unlist(family_map, use.names = FALSE))
+    missing <- setdiff(needed, colnames(L))
+    if (length(missing) > 0) {
+      stop("L is missing features required by family_map: ",
+           paste(missing, collapse = ", "))
+    }
+  }
+  
+  family_map <- family_map[sort(names(family_map))]
+  
+  # raw and normalized family evidence
+  fam_raw <- lapply(names(family_map), function(g) {
+    feats <- family_map[[g]]
+    X <- Lpos[, feats, drop = FALSE]
+    rowSums(X, na.rm = TRUE)
+  })
+  names(fam_raw) <- names(family_map)
+  fam_raw <- as.data.frame(fam_raw, check.names = FALSE)
+  names(fam_raw) <- paste0(names(fam_raw), "_axis_raw")
+  
+  fam_scores <- lapply(names(family_map), function(g) {
+    feats <- family_map[[g]]
+    X <- Lpos[, feats, drop = FALSE]
+    s <- rowSums(X, na.rm = TRUE)
+    if (normalize_family) {
+      s <- s / sqrt(length(feats))
+    }
+    s
+  })
+  names(fam_scores) <- names(family_map)
+  fam_scores <- as.data.frame(fam_scores, check.names = FALSE)
+  names(fam_scores) <- paste0(names(fam_scores), "_axis")
+  
+  # percentage contribution using RAW family sums / RAW total positive sum
+  fam_pct <- fam_raw
+  for (j in seq_len(ncol(fam_pct))) {
+    fam_pct[[j]] <- ifelse(pos_sum_raw > eps, fam_raw[[j]] / pos_sum_raw, 0)
+  }
+  names(fam_pct) <- paste0(gsub("_axis_raw$", "", names(fam_raw)), "_pct")
+  
+  list(
+    pos_sum_raw = pos_sum_raw,
+    pos_sum = pos_sum,
+    fam_scores = fam_scores,
+    fam_raw = fam_raw,
+    fam_pct = fam_pct,
+    family_map = family_map
+  )
+}
+
+# ------------------------------------------------------------
+# Stable scaling for overall positive evidence
+# ------------------------------------------------------------
+make_stable_scaler <- function(x, min_iqr = 1e-4) {
+  x <- x[is.finite(x)]
+  
+  med <- median(x, na.rm = TRUE)
+  iqr <- IQR(x, na.rm = TRUE)
+  iqr_ok <- is.finite(iqr) && iqr >= min_iqr
+  
+  list(
+    median = med,
+    iqr = iqr,
+    iqr_ok = iqr_ok
+  )
+}
+
+apply_stable_scaler <- function(x, scaler) {
+  data.frame(
+    raw = x,
+    stable_z = if (scaler$iqr_ok) {
+      (x - scaler$median) / scaler$iqr
+    } else {
+      x - scaler$median
+    },
+    stringsAsFactors = FALSE
+  )
+}
+
+# ------------------------------------------------------------
+# Main appender
+# ------------------------------------------------------------
+append_interpretability_scores <- function(scores_train,
+                                           scores_val,
+                                           ll_train,
+                                           ll_val,
+                                           stable_idx = NULL,
+                                           normalize_family = TRUE,
+                                           normalize_overall = TRUE,
+                                           min_iqr = 1e-4) {
+  if (is.null(stable_idx)) {
+    stable_idx <- scores_train$d_dist < 0
+  }
+  
+  if (!is.logical(stable_idx) || length(stable_idx) != nrow(scores_train)) {
+    stop("stable_idx must be logical and align with scores_train rows.")
+  }
+  
+  L_train <- extract_L_matrix(ll_train)
+  L_val   <- extract_L_matrix(ll_val)
+  
+  if (nrow(L_train) != nrow(scores_train)) {
+    stop("nrow(L_train) must match nrow(scores_train)")
+  }
+  if (nrow(L_val) != nrow(scores_val)) {
+    stop("nrow(L_val) must match nrow(scores_val)")
+  }
+  
+  # training-defined family map
+  train_feats <- colnames(L_train)
+  val_feats   <- colnames(L_val)
+  
+  missing_in_val <- setdiff(train_feats, val_feats)
+  if (length(missing_in_val) > 0) {
+    stop("Validation L matrix is missing training features: ",
+         paste(missing_in_val, collapse = ", "))
+  }
+  
+  L_val <- L_val[, train_feats, drop = FALSE]
+  
+  train_fam <- extract_signal_family(train_feats)
+  family_map <- split(train_feats, train_fam)
+  family_map <- family_map[sort(names(family_map))]
+  
+  train_pos <- compute_positive_llr_scores(
+    L_train,
+    normalize_family = normalize_family,
+    normalize_overall = normalize_overall,
+    family_map = family_map
+  )
+  
+  val_pos <- compute_positive_llr_scores(
+    L_val,
+    normalize_family = normalize_family,
+    normalize_overall = normalize_overall,
+    family_map = family_map
+  )
+  
+  # overall positive evidence
+  scores_train$pos_sum_raw <- train_pos$pos_sum_raw
+  scores_val$pos_sum_raw   <- val_pos$pos_sum_raw
+  
+  scores_train$pos_sum <- train_pos$pos_sum
+  scores_val$pos_sum   <- val_pos$pos_sum
+  
+  pos_scaler <- make_stable_scaler(scores_train$pos_sum[stable_idx], min_iqr = min_iqr)
+  pos_scaled_val <- apply_stable_scaler(scores_val$pos_sum, pos_scaler)
+  scores_val$pos_sum_stable_z <- pos_scaled_val$stable_z
+  
+  # family scores and family percentages
+  fam_cols <- names(train_pos$fam_scores)
+  pct_cols <- names(train_pos$fam_pct)
+  
+  if (!setequal(fam_cols, names(val_pos$fam_scores))) {
+    stop("Family axis names differ between training and validation.")
+  }
+  val_pos$fam_scores <- val_pos$fam_scores[, fam_cols, drop = FALSE]
+  
+  if (!setequal(pct_cols, names(val_pos$fam_pct))) {
+    stop("Family percentage names differ between training and validation.")
+  }
+  val_pos$fam_pct <- val_pos$fam_pct[, pct_cols, drop = FALSE]
+  
+  family_scaler_info <- list()
+  
+  for (col in fam_cols) {
+    train_vec <- train_pos$fam_scores[[col]]
+    val_vec   <- val_pos$fam_scores[[col]]
+    
+    scores_train[[col]] <- train_vec
+    scores_val[[col]]   <- val_vec
+    
+    sc <- make_stable_scaler(train_vec[stable_idx], min_iqr = min_iqr)
+    tmp <- apply_stable_scaler(val_vec, sc)
+    scores_val[[paste0(col, "_stable_z")]] <- tmp$stable_z
+    family_scaler_info[[col]] <- sc
+  }
+  
+  for (col in pct_cols) {
+    scores_val[[col]] <- val_pos$fam_pct[[col]]
+  }
+  
+  list(
+    scores_train = scores_train,
+    scores_val = scores_val,
+    stable_idx = stable_idx,
+    family_axis_cols = fam_cols,
+    family_pct_cols = pct_cols,
+    family_map = family_map,
+    pos_scaler = pos_scaler,
+    family_scalers = family_scaler_info
+  )
+}
+
+# ------------------------------------------------------------
+# Dominant family by stable-z and by percentage contribution
+# ------------------------------------------------------------
+append_family_summaries <- function(scores_val, family_axis_cols, family_pct_cols) {
+  z_cols <- paste0(family_axis_cols, "_stable_z")
+  
+  # dominant family by stable-z
+  dom_family <- apply(scores_val[, z_cols, drop = FALSE], 1, function(v) {
+    if (all(is.na(v))) return(NA_character_)
+    names(v)[which.max(v)]
+  })
+  
+  dom_z <- apply(scores_val[, z_cols, drop = FALSE], 1, function(v) {
+    if (all(is.na(v))) return(NA_real_)
+    max(v, na.rm = TRUE)
+  })
+  
+  scores_val$dominant_family_axis <- gsub("_axis_stable_z$", "", dom_family)
+  scores_val$dominant_family_stable_z <- dom_z
+  
+  # dominant family by percentage composition
+  dom_pct_family <- apply(scores_val[, family_pct_cols, drop = FALSE], 1, function(v) {
+    if (all(is.na(v))) return(NA_character_)
+    names(v)[which.max(v)]
+  })
+  
+  dom_pct <- apply(scores_val[, family_pct_cols, drop = FALSE], 1, function(v) {
+    if (all(is.na(v))) return(NA_real_)
+    max(v, na.rm = TRUE)
+  })
+  
+  scores_val$dominant_family_pct_axis <- gsub("_pct$", "", dom_pct_family)
+  scores_val$dominant_family_pct <- dom_pct
+  
+  scores_val
+}
+
+# ------------------------------------------------------------
+# Qualitative level for overall positive evidence
+# ------------------------------------------------------------
+positive_evidence_band <- function(z) {
+  if (is.na(z)) return("unknown")
+  if (z < 0) return("low")
+  if (z < 2) return("moderate")
+  "high"
+}
+
+# ------------------------------------------------------------
+# Text summary
+# ------------------------------------------------------------
+append_risk_profile <- function(scores_val,
+                                family_axis_cols,
+                                family_pct_cols,
+                                top_n_families = 3,
+                                d_dist_low_cut = 0,
+                                d_dist_high_cut = 5,
+                                score_digits = 2,
+                                pct_digits = 0) {
+  
+  missing_cols <- setdiff(c("d_dist", "pos_sum_stable_z", family_pct_cols), names(scores_val))
+  if (length(missing_cols) > 0) {
+    stop("Missing required columns in scores_val: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  risk_band_from_ddist <- function(x, low_cut = 0, high_cut = 5) {
+    if (is.na(x)) return("unknown")
+    if (x < low_cut) return("stable / low-risk geometry")
+    if (x < high_cut) return("ambiguous / monitor geometry")
+    "high-risk geometry"
+  }
+  
+  summarize_top_families_pct <- function(row_vals, pct_names, top_n = 3, digits = 0) {
+    vals <- as.numeric(row_vals)
+    names(vals) <- gsub("_pct$", "", pct_names)
+    
+    keep <- is.finite(vals)
+    vals <- vals[keep]
+    if (length(vals) == 0) return(NA_character_)
+    
+    ord <- order(vals, decreasing = TRUE)
+    ord <- ord[seq_len(min(top_n, length(ord)))]
+    
+    paste(
+      sprintf("%s (%s%%)",
+              names(vals)[ord],
+              formatC(100 * vals[ord], format = "f", digits = digits)),
+      collapse = "; "
+    )
+  }
+  
+  profiles <- vapply(seq_len(nrow(scores_val)), function(i) {
+    dd <- scores_val$d_dist[i]
+    geom_band <- risk_band_from_ddist(dd, d_dist_low_cut, d_dist_high_cut)
+    
+    pos_z <- scores_val$pos_sum_stable_z[i]
+    pos_band <- positive_evidence_band(pos_z)
+    
+    fam_vals <- scores_val[i, family_pct_cols, drop = FALSE]
+    top_fam <- summarize_top_families_pct(
+      row_vals = fam_vals,
+      pct_names = family_pct_cols,
+      top_n = top_n_families,
+      digits = pct_digits
+    )
+    
+    paste0(
+      "Geometry: ", geom_band,
+      " (d_dist=", formatC(dd, format = "f", digits = score_digits), "). ",
+      "Overall positive evidence: ", pos_band,
+      " (z=", ifelse(is.na(pos_z), "NA", formatC(pos_z, format = "f", digits = score_digits)), "). ",
+      "Positive evidence composition: ", top_fam, "."
+    )
+  }, character(1))
+  
+  scores_val$geometry_band <- vapply(
+    scores_val$d_dist,
+    risk_band_from_ddist,
+    character(1),
+    low_cut = d_dist_low_cut,
+    high_cut = d_dist_high_cut
+  )
+  
+  scores_val$positive_evidence_band <- vapply(
+    scores_val$pos_sum_stable_z,
+    positive_evidence_band,
+    character(1)
+  )
+  
+  scores_val$risk_profile <- profiles
+  
+  scores_val
+}
+
+```
+
+
+
+
+
+```{r}
+
+interp_out <- append_interpretability_scores(
+  scores_train = scores_train,
+  scores_val = scores_val,
+  ll_train = Ltrain,
+  ll_val = Lval,
+  stable_idx = scores_train$d_dist < 0,
+  normalize_family = FALSE,
+  normalize_overall = TRUE,
+  min_iqr = 1e-4
+)
+
+scores_train <- interp_out$scores_train
+scores_val   <- interp_out$scores_val
+
+scores_val <- append_family_summaries(
+  scores_val = scores_val,
+  family_axis_cols = interp_out$family_axis_cols,
+  family_pct_cols = interp_out$family_pct_cols
+)
+
+scores_val <- append_risk_profile(
+  scores_val = scores_val,
+  family_axis_cols = interp_out$family_axis_cols,
+  family_pct_cols = interp_out$family_pct_cols,
+  top_n_families = 3,
+  d_dist_low_cut = 0,
+  d_dist_high_cut = 2,
+  score_digits = 2,
+  pct_digits = 0
+)
+
+```
+
+
+### Boxplot of z versus binned d_dist by class. Median separation in z exists between classes in almost every d_dist bin.  
+
+```{r}
+
+scores_val %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(d_dist_bin = cut(d_dist, breaks = seq(0, 20, by = 1))) %>% ggplot() +
+  geom_boxplot(aes(y=pos_sum_stable_z, x=d_dist_bin, color=mortality)) +
+  theme_minimal()
+
+scores_val %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(d_dist_bin = cut(d_dist, breaks = seq(0, 20, by = 1))) %>% ggplot() +
+  geom_boxplot(aes(y=l, x=d_dist_bin, color=mortality)) +
+  theme_minimal()
+
+```
+
+
+```{r}
+
+scores_val %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(pos_sum_bin = cut(pos_sum_stable_z, breaks = seq(0, 20, by = 1))) %>% ggplot() +
+  geom_boxplot(aes(y=d_dist, x=pos_sum_bin, color=mortality)) +
+  theme_minimal()
+
+
+```
+
+### Mortality rate and case counts for bins of z  
+
+```{r}
+
+scores_val %>%
+  mutate(
+    pos_band = cut(
+      pos_sum_stable_z,
+      breaks = c(-Inf, 0, 1, 2, 3, 4, 5, 6, 7, 8, Inf),
+      right = FALSE,
+      labels = c("<0", "[0,1)", "[1,2)", "(2,3]","(3,4]", "(4,5]","(5,6]","(6,7]","(7,8]", ">=8")
+    )
+  ) %>%
+  group_by(pos_band) %>%
+  summarise(
+    count = n(),
+    mortality_rate = mean(mortality == 1),
+    .groups = "drop"
+  )
+
+scores_val %>%
+  mutate(
+    pos_band = cut(
+      pos_sum_stable_z,
+      breaks = c(-Inf, 0, 1, 2, 3, 4, 5, 6, 7, 8, Inf),
+      right = FALSE,
+      labels = c("<0", "[0,1)", "[1,2)", "(2,3]","(3,4]", "(4,5]","(5,6]","(6,7]","(7,8]", ">=8")
+    )
+  ) %>%
+  group_by(pos_band) %>%
+  summarise(
+    count = n(),
+    mortality_rate = mean(mortality == 1),
+    .groups = "drop"
+  ) %>% ggplot(aes(x=pos_band, y=mortality_rate, group=1)) + geom_point() + geom_line() + theme_minimal()
+
+```
+
+
+```{r}
+
+pROC::roc(scores_val$mortality, scores_val$pos_sum_stable_z)
+
+```
+
+
+```{r}
+
+cor(scores_val$p, scores_val$pos_sum_stable_z)
+
+```
+
+
+```{r}
+
+scores_val%>%filter(d_dist >=0, d_dist < 5) %>% ggplot(aes(x=d_dist, y=l, color=mortality)) + geom_point(alpha=0.6) + theme_minimal()
+
+scores_val%>%filter(d_dist >=0, d_dist < 5) %>% ggplot(aes(x=d_dist, y=pos_sum_stable_z, color=mortality)) + geom_point(alpha=0.6) + theme_minimal()
+
+```
+
+
+```{r}
+
+pos_sum_val_fit <- glm(pos_sum_stable_z ~ d_dist, data=scores_val)
+
+```
+
+```{r}
+
+summary(pos_sum_val_fit)
+
+```
+
+
+```{r}
+
+scores_val$pos_sum_cond <- predict(pos_sum_val_fit, scores_val)
+
+```
+
+```{r}
+
+scores_val$risk_axis_residual <- scores_val$pos_sum_stable_z - scores_val$pos_sum_cond
+
+```
+
+
+```{r}
+
+scores_val%>%filter(d_dist >=0, d_dist < 5) %>% ggplot(aes(x=d_dist, y=risk_axis_residual, color=mortality)) + geom_point(alpha=0.6) + theme_minimal()
+
+```
+
+```{r}
+
+scores_val %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(d_dist_bin = cut(d_dist, breaks = seq(0, 20, by = 1))) %>% ggplot() +
+  geom_boxplot(aes(y=risk_axis_residual, x=d_dist_bin, color=mortality)) +
+  theme_minimal()
+
+```
+
+
+## Risk Decomposition
+
+```{r}
+
+
+mort_0_example <- head(as.vector(head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="0"), 1))[grep("_(raw|axis)$", names(as.vector(head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="0"), 1))))], -2)
+
+mort_0_example <- mort_0_example[mort_0_example > 0]
+
+mort_0_example <- mort_0_example[order(unlist(mort_0_example), decreasing = TRUE)]
+
+mort_0_example <- head(mort_0_example, 4)
+
+mort_0_example_caption <- head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="0"), 1)["risk_profile"]
+
+barplot(as.numeric(mort_0_example), names.arg=names(mort_0_example))
+title(sub = "Geometry: ambiguous / monitor geometry (d_dist=0.58).\n Overall positive evidence: moderate (z=0.44).\n Positive evidence composition: spo2 (36%); mbp (18%); sbp (18%)")
+
+```
+
+
+```{r}
+
+
+mort_1_example <- head(as.vector(head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="1"), 1))[grep("_(raw|axis)$", names(as.vector(head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="1"), 1))))], -2)
+
+mort_1_example <- mort_1_example[mort_1_example > 0]
+
+mort_1_example <- mort_1_example[order(unlist(mort_1_example), decreasing = TRUE)]
+
+mort_1_example <- head(mort_1_example, 4)
+
+mort_1_example_caption <- head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="1"), 1)["risk_profile"]
+
+barplot(as.numeric(mort_1_example), names.arg=names(mort_1_example))
+title(sub = "Geometry: ambiguous / monitor geometry (d_dist=1.60).\n Overall positive evidence: high (z=3.35).\n Positive evidence composition: resp_rate (27%); heart_rate (20%); hemoglobin (11%).")
+
+```
+
+
+## Evidence Geometry - Test Set
+
+### Apply trained evidence geometry on Test Set
+
+```{r}
+
+Ltest <- loglik_matrices(mimic_clean_test%>%dplyr::select(-stay_id), obj$fit, alpha=spec$alpha)
+# val/test scoring
+scores_test <- bind_cols(stay_id=mimic_clean_test$stay_id, 
+                            mortality=mimic_clean_test$mortality, 
+                            score_risk(Ltest$l_pos, Ltest$l_neg,  obj$fit$weights, obj$geom, 
+                                       spec$alpha, spec$eps))
+
+
+```
+
+
+```{r}
+
+scores_test <- bind_cols(scores_test,
+                            p = predict(rf_train_1, mimic_clean_test%>%dplyr::select(-stay_id, -mortality))$predictions[,"1"])
+
+```
+
+
+### Obtain z and percent contributions of feature groups on Test Set. 
+
+This part uses marginal median and IQR of d_dist < 0 region from training set.  
+
+```{r}
+
+interp_out_test <- append_interpretability_scores(
+  scores_train = scores_train,
+  scores_val = scores_test,
+  ll_train = Ltrain,
+  ll_val = Ltest,
+  stable_idx = scores_train$d_dist < 0,
+  normalize_family = FALSE,
+  normalize_overall = TRUE,
+  min_iqr = 1e-4
+)
+
+scores_train <- interp_out_test$scores_train
+scores_test   <- interp_out_test$scores_val
+
+scores_test <- append_family_summaries(
+  scores_val = scores_test,
+  family_axis_cols = interp_out_test$family_axis_cols,
+  family_pct_cols = interp_out_test$family_pct_cols
+)
+
+scores_test <- append_risk_profile(
+  scores_val = scores_test,
+  family_axis_cols = interp_out_test$family_axis_cols,
+  family_pct_cols = interp_out_test$family_pct_cols,
+  top_n_families = 3,
+  d_dist_low_cut = 0,
+  d_dist_high_cut = 2,
+  score_digits = 2,
+  pct_digits = 0
+)
+
+```
+
+
+### Mortality Rate of d_dist < 0 region  
+
+```{r}
+
+nrow(scores_test%>%filter(d_dist < 0 , mortality=="1")) / nrow(scores_test%>%filter(d_dist < 0))
+
+```
+
+### Survived cases in d_dist < 0 as a fraction of total survived cases
+
+```{r}
+
+nrow(scores_test%>%filter(d_dist < 0, mortality=="0")) / nrow(scores_test%>%filter(mortality=="0"))
+
+```
+
+### Mortality Rate curve and case counts  
+
+```{r}
+
+scores_test %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(d_dist_bin = cut(d_dist, breaks = seq(0, 20, by = 1))) %>% group_by(d_dist_bin) %>% dplyr::summarize(count = n(), mortality_rate = mean(mortality == "1"))
+
+
+scores_test %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(d_dist_bin = cut(d_dist, breaks = seq(0, 20, by = 1))) %>%
+  group_by(d_dist_bin) %>%
+  summarise(
+    mortality_rate = mean(mortality=="1")
+  ) %>% ggplot(aes(x=d_dist_bin, y=mortality_rate, group = 1)) + geom_point() + geom_line() + theme_minimal()
+
+
+```
+
+
+### Mortality rate and case counts for bins of z  
+
+```{r}
+
+scores_test %>%
+  mutate(
+    pos_band = cut(
+      pos_sum_stable_z,
+      breaks = c(-Inf, 0, 1, 2, 3, 4, 5, 6, 7, 8, Inf),
+      right = FALSE,
+      labels = c("<0", "[0,1)", "[1,2)", "(2,3]","(3,4]", "(4,5]","(5,6]","(6,7]","(7,8]", ">=8")
+    )
+  ) %>%
+  group_by(pos_band) %>%
+  summarise(
+    count = n(),
+    mortality_rate = mean(mortality == 1),
+    .groups = "drop"
+  )
+
+scores_test %>%
+  mutate(
+    pos_band = cut(
+      pos_sum_stable_z,
+      breaks = c(-Inf, 0, 1, 2, 3, 4, 5, 6, 7, 8, Inf),
+      right = FALSE,
+      labels = c("<0", "[0,1)", "[1,2)", "(2,3]","(3,4]", "(4,5]","(5,6]","(6,7]","(7,8]", ">=8")
+    )
+  ) %>%
+  group_by(pos_band) %>%
+  summarise(
+    count = n(),
+    mortality_rate = mean(mortality == 1),
+    .groups = "drop"
+  ) %>% ggplot(aes(x=pos_band, y=mortality_rate, group=1)) + geom_point() + geom_line() + theme_minimal()
+
+```
+
+### Triage Table
+  
+1. Boxplot of z versus d_dist bin by class.  
+2. Primary triage table using d_dist ($d_{dist} \geq 2$ -> High Risk)  
+  
+```{r}
+
+scores_test %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(d_dist_bin = cut(d_dist, breaks = seq(0, 20, by = 1))) %>% ggplot() +
+  geom_boxplot(aes(y=pos_sum_stable_z, x=d_dist_bin, color=mortality)) +
+  theme_minimal()
+
+scores_test %>% group_by(geometry_band) %>% dplyr::summarize(count = n(), mortality_rate = mean(mortality=="1"), percent_pop = n()/nrow(scores_test))
+
+```
+
+
+### Example Risk Profiles
+
+```{r}
+
+head(scores_test$risk_profile, 8)
+
+```
+
+### RF p vs mortality rate
+
+```{r}
+
+scores_test %>% mutate(p_bin = cut(p, breaks = 25)) %>% group_by(p_bin) %>% dplyr::summarize(count = n(), mortality_rate = mean(mortality == "1"))
+
+
+scores_test %>% mutate(p_bin = cut(p, breaks = 25)) %>%
+  group_by(p_bin) %>%
+  summarise(
+    mortality_rate = mean(mortality=="1")
+  ) %>% ggplot(aes(x=p_bin, y=mortality_rate, group = 1)) + geom_point() + geom_line() + theme_minimal()
+
+
+```
+
+### RF mortality in matched low risk zone size (17.13%)
+
+```{r}
+
+rf_matched_safe_zone <- head(scores_test%>%select(mortality, p)%>%arrange(p), round(nrow(scores_test)*0.1713065,0))
+
+```
+
+```{r}
+
+nrow(rf_matched_safe_zone%>%filter(mortality=="1"))/nrow(rf_matched_safe_zone)
+
+```
+
+```{r}
+
+max(rf_matched_safe_zone$p)
+
+```
+
+
+### RF mortality in matched high risk zone size (36.65%)
+
+```{r}
+
+rf_matched_highrisk_zone <- tail(scores_test%>%select(mortality, p)%>%arrange(p), round(0.3664862*nrow(scores_test),0))
+
+```
+
+```{r}
+
+nrow(rf_matched_highrisk_zone%>%filter(mortality=="1"))/nrow(rf_matched_highrisk_zone)
+
+```
+
+
+## Survival Analysis
+
+```{r}
+
+mimiciv_cohort <- read.csv(here("v2","src","data","mimiciv","mimiciv_ext_icu_cohort_1_timetodeath.csv"))
+
+```
+
+```{r}
+
+mimiciv_timeperiod <- mimiciv_cohort%>%dplyr::select(stay_id, duration_hours_from_24h, event_after_24h)
+
+```
+
+```{r}
+
+cohort_age <- mimiciv_import%>%dplyr::select(stay_id, anchor_age)
+
+```
+
+```{r}
+
+mimiciv_timeperiod$duration_hours_from_24h <- ifelse(
+  mimiciv_timeperiod$duration_hours_from_24h <= 0,
+  0.01,
+  mimiciv_timeperiod$duration_hours_from_24h
+)
+
+```
+
+
+```{r}
+
+risk_timeperiod_train <- left_join(scores_train, mimiciv_timeperiod, by=join_by(stay_id))%>%dplyr::select(all_of(c(names(scores_train), "duration_hours_from_24h", "event_after_24h")))
+
+risk_timeperiod_train <- left_join(risk_timeperiod_train, cohort_age, by=join_by(stay_id))
+
+
+```
+
+```{r}
+
+risk_timeperiod_val <- left_join(scores_val, mimiciv_timeperiod, by=join_by(stay_id))%>%dplyr::select(all_of(c(names(scores_val), "duration_hours_from_24h", "event_after_24h")))
+
+risk_timeperiod_val <- left_join(risk_timeperiod_val, cohort_age, by=join_by(stay_id))
+
+```
+
+
+```{r}
+
+risk_timeperiod_test <- left_join(scores_test, mimiciv_timeperiod, by=join_by(stay_id))%>%dplyr::select(all_of(c(names(scores_test), "duration_hours_from_24h", "event_after_24h")))
+
+risk_timeperiod_test <- left_join(risk_timeperiod_test, cohort_age, by=join_by(stay_id))
+
+```
+
+
+
+### Kaplan-Meier Analysis of d_dist
+
+
+```{r}
+
+risk_timeperiod_train$d_dist_bin <- cut(
+  risk_timeperiod_train$d_dist,
+  breaks = c(-Inf, -0.1, 2, Inf),
+  labels = c("Low", "Ambiguous", "High")
+)
+
+```
+
+
+```{r}
+
+
+km_fit <- survfit(
+  Surv(duration_hours_from_24h, event_after_24h) ~ d_dist_bin,
+  data = risk_timeperiod_train
+)
+
+ggsurvplot(
+  km_fit,
+  data = risk_timeperiod_train,
+  risk.table = TRUE,
+  pval = TRUE
+)
+
+```
+
+### Age Only
+
+```{r}
+
+M_base <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ anchor_age, data = risk_timeperiod_train)
+
+summary(M_base)
+
+```
+
+
+
+```{r}
+
+lp_age <- predict(M_base, newdata = risk_timeperiod_val, type = "lp")
+
+# Concordance
+concordance(Surv(duration_hours_from_24h, event_after_24h) ~ lp_age, 
+            data = risk_timeperiod_val, reverse = TRUE)
+
+# timeROC
+time_roc_age <- timeROC(
+  T = risk_timeperiod_val$duration_hours_from_24h,
+  delta = risk_timeperiod_val$event_after_24h,
+  marker = lp_age,
+  cause = 1,
+  times = c(48, 60, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_age$AUC
+
+```
+
+### d_dist
+
+```{r}
+
+M_geom <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ d_dist, data = risk_timeperiod_train)
+
+summary(M_geom)
+
+```
+
+```{r}
+
+lp_geom <- predict(M_geom, newdata = risk_timeperiod_val, type = "lp")
+
+# Concordance
+concordance(Surv(duration_hours_from_24h, event_after_24h) ~ lp_geom, 
+            data = risk_timeperiod_val, reverse = TRUE)
+
+# timeROC
+time_roc_geom <- timeROC(
+  T = risk_timeperiod_val$duration_hours_from_24h,
+  delta = risk_timeperiod_val$event_after_24h,
+  marker = lp_geom,
+  cause = 1,
+  times = c(48, 60, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_geom$AUC
+
+```
+
+```{r}
+
+M_severity <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ pos_sum, data = risk_timeperiod_train)
+
+summary(M_severity)
+
+```
+
+```{r}
+
+M_geom_severity <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ d_dist + pos_sum, data = risk_timeperiod_train)
+
+summary(M_geom_severity) 
+
+```
+
+
+```{r}
+
+anova(M_base, M_geom, M_severity, M_geom_severity, test="LRT")
+
+```
+
+### Measurement Groups Only
+
+```{r}
+
+M_composition <- coxph(as.formula(paste("Surv(duration_hours_from_24h, event_after_24h) ~ ", 
+                             paste(names(scores_train)[grep("_axis", names(scores_train))], collapse = " + "), collapse='')), 
+                       data = risk_timeperiod_train)
+
+summary(M_composition)
+
+```
+
+
+```{r}
+
+lp_comp <- predict(M_composition, newdata = risk_timeperiod_val, type = "lp")
+
+# Concordance
+concordance(Surv(duration_hours_from_24h, event_after_24h) ~ lp_comp, 
+            data = risk_timeperiod_val, reverse = TRUE)
+
+# timeROC
+time_roc_comp <- timeROC(
+  T = risk_timeperiod_val$duration_hours_from_24h,
+  delta = risk_timeperiod_val$event_after_24h,
+  marker = lp_comp,
+  cause = 1,
+  times = c(48, 60, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_comp$AUC
+
+```
+
+```{r}
+
+anova(M_base, M_geom_severity, M_composition, test="LRT")
+
+```
+
+
+```{r}
+
+M_d_dist_composition <- coxph(as.formula(paste("Surv(duration_hours_from_24h, event_after_24h) ~ d_dist +", 
+                             paste(names(scores_train)[grep("_axis", names(scores_train))], collapse = " + "), collapse='')), 
+                       data = risk_timeperiod_train)
+
+summary(M_d_dist_composition)
+
+```
+
+```{r}
+
+M_d_dist_pos_sum_composition <- coxph(as.formula(paste("Surv(duration_hours_from_24h, event_after_24h) ~ d_dist + pos_sum + ", 
+                             paste(names(scores_train)[grep("_axis", names(scores_train))], collapse = " + "), collapse='')), 
+                       data = risk_timeperiod_train)
+
+summary(M_d_dist_pos_sum_composition)
+
+```
+
+
+```{r}
+
+anova(M_base, M_composition, M_d_dist_composition, test="LRT")
+
+```
+
+```{r}
+
+M_d_dist_strata_composition <- coxph(as.formula(paste("Surv(duration_hours_from_24h, event_after_24h) ~ ", 
+                             paste(names(scores_train)[grep("_axis", names(scores_train))], collapse = " + "), 
+                             " + strata(d_dist_bin)", collapse='')), 
+                       data = risk_timeperiod_train)
+
+summary(M_d_dist_strata_composition)
+
+```
+
+
+### d_dist + axes
+
+```{r}
+
+lp_train_raw <- predict(M_d_dist_composition, newdata = risk_timeperiod_train, type = "lp", reference = "zero")
+lp_val_raw   <- predict(M_d_dist_composition, newdata = risk_timeperiod_val,   type = "lp", reference = "zero")
+
+```
+
+```{r}
+
+lp_anchor <- mean(lp_train_raw[risk_timeperiod_train$d_dist < 0], na.rm = TRUE)
+
+```
+
+```{r}
+
+risk_timeperiod_train$lp_rel <- lp_train_raw - lp_anchor
+risk_timeperiod_val$lp_rel   <- lp_val_raw   - lp_anchor
+
+risk_timeperiod_train$rr_rel <- exp(risk_timeperiod_train$lp_rel)
+risk_timeperiod_val$rr_rel   <- exp(risk_timeperiod_val$lp_rel)
+
+```
+
+```{r}
+
+concordance(Surv(duration_hours_from_24h, event_after_24h) ~ lp_rel, data = risk_timeperiod_val, reverse = TRUE)
+
+```
+
+```{r}
+
+time_roc <- timeROC(
+  T = risk_timeperiod_val$duration_hours_from_24h,
+  delta = risk_timeperiod_val$event_after_24h,
+  marker = risk_timeperiod_val$lp_rel,   # or rr_rel, same ranking
+  cause = 1,
+  times = c(48, 60, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc$AUC
+
+```
+
+```{r}
+
+risk_timeperiod_val$risk_group <- cut(risk_timeperiod_val$lp_rel,
+                      breaks = quantile(risk_timeperiod_val$lp_rel, probs = c(0, 0.25, 0.5, 0.75, 1)),
+                      include.lowest = TRUE)
+
+risk_fit_val <- survfit(Surv(duration_hours_from_24h, event_after_24h) ~ risk_group, data = risk_timeperiod_val)
+plot(risk_fit_val, col = 1:4, lwd = 2)
+
+```
+
+
+```{r}
+
+termplot(M_d_dist_composition, se = TRUE)
+
+```
+
+
+```{r}
+
+dd <- datadist(risk_timeperiod_train)
+options(datadist = "dd")
+
+```
+
+
+```{r}
+
+cox_spline1 <- cph(
+  Surv(duration_hours_from_24h, event_after_24h) ~ 
+    rcs(d_dist, 4) +
+    anchor_age_axis +
+    gender_axis +
+    bicarbonate_axis +
+    resp_rate_axis +
+    lactate_axis +
+    creatinine_axis +
+    platelet_axis +
+    spo2_axis + 
+    sbp_axis +
+    temperature_axis,
+  data = risk_timeperiod_train,
+  x = TRUE,
+  y = TRUE,
+  surv = TRUE
+)
+
+```
+
+
+```{r}
+
+cox_spline2 <- cph(
+  Surv(duration_hours_from_24h, event_after_24h) ~ 
+    rcs(d_dist, 4),
+  data = risk_timeperiod_train,
+  x = TRUE,
+  y = TRUE,
+  surv = TRUE
+)
+
+```
+
+
+```{r}
+
+plot(Predict(cox_spline1, d_dist), 
+     xlab = "d_dist", 
+     ylab = "Log-Hazard Ratio")
+
+plot(Predict(cox_spline1, anchor_age_axis), 
+     xlab = "anchor_age_axis", 
+     ylab = "Log-Hazard Ratio")
+
+plot(Predict(cox_spline1, resp_rate_axis), 
+     xlab = "resp_rate_axis", 
+     ylab = "Log-Hazard Ratio")
+
+```
+
+```{r}
+
+plot(Predict(cox_spline2, d_dist), 
+     xlab = "d_dist", 
+     ylab = "Log-Hazard Ratio")
+
+
+```
+
+### Spline(d_dist) + axes
+
+```{r}
+
+lp_spline_train_raw <- predict(cox_spline1, newdata = risk_timeperiod_train, type = "lp")
+lp_spline_val_raw   <- predict(cox_spline1, newdata = risk_timeperiod_val,   type = "lp")
+
+```
+
+
+```{r}
+
+lp_spline_anchor <- mean(lp_spline_train_raw[risk_timeperiod_train$d_dist < 0], na.rm = TRUE)
+
+risk_timeperiod_val$lp_spline_rel <- lp_spline_val_raw - lp_spline_anchor
+
+```
+
+
+```{r}
+
+# Concordance
+concordance(Surv(duration_hours_from_24h, event_after_24h) ~ risk_timeperiod_val$lp_spline_rel, 
+            data = risk_timeperiod_val, reverse = TRUE)
+
+# timeROC
+time_roc_spline <- timeROC(
+  T = risk_timeperiod_val$duration_hours_from_24h,
+  delta = risk_timeperiod_val$event_after_24h,
+  marker = risk_timeperiod_val$lp_spline_rel,
+  cause = 1,
+  times = c(48, 60, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_spline$AUC
+
+```
+
+### Spline(d_dist)
+
+```{r}
+
+lp_spline2_train_raw <- predict(cox_spline2, newdata = risk_timeperiod_train, type = "lp")
+lp_spline2_val_raw   <- predict(cox_spline2, newdata = risk_timeperiod_val,   type = "lp")
+
+```
+
+
+```{r}
+
+lp_spline2_anchor <- mean(lp_spline2_train_raw[risk_timeperiod_train$d_dist < 0], na.rm = TRUE)
+
+risk_timeperiod_val$lp_spline2_rel <- lp_spline2_val_raw - lp_spline2_anchor
+
+```
+
+```{r}
+
+# Concordance
+concordance(Surv(duration_hours_from_24h, event_after_24h) ~ risk_timeperiod_val$lp_spline2_rel, 
+            data = risk_timeperiod_val, reverse = TRUE)
+
+# timeROC
+time_roc_spline2 <- timeROC(
+  T = risk_timeperiod_val$duration_hours_from_24h,
+  delta = risk_timeperiod_val$event_after_24h,
+  marker = risk_timeperiod_val$lp_spline2_rel,
+  cause = 1,
+  times = c(48, 60, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_spline2$AUC
+
+```
+
+
+```{r}
+
+lp_spline_terms <- predict(cox_spline1, newdata = risk_timeperiod_val, type = "terms")
+
+```
+
+### Raw Feature Subset
+
+```{r}
+
+cox_baseline_train <- left_join(mimic_clean_train, mimiciv_timeperiod, by=join_by(stay_id))
+
+```
+
+```{r}
+
+cox_baseline_val <- left_join(mimic_clean_val, mimiciv_timeperiod, by=join_by(stay_id))
+
+```
+
+
+```{r}
+
+raw_vars <- c(
+  "anchor_age",
+  "gender",
+  "heart_rate_mean",
+  "resp_rate_mean",
+  "sbp_mean",
+  "dbp_mean",
+  "mbp_mean",
+  "spo2_mean",
+  "temperature_mean",
+  "glucose_max",
+  "creatinine_max",
+  "bicarbonate_min",
+  "lactate_max",
+  "sodium_min",
+  "potassium_max",
+  "platelet_min",
+  "wbc_max",
+  "hemoglobin_min"
+)
+
+form_raw <- as.formula(
+  paste(
+    "Surv(duration_hours_from_24h, event_after_24h) ~",
+    paste(raw_vars, collapse = " + ")
+  )
+)
+
+cox_raw <- coxph(form_raw, data = cox_baseline_train)
+summary(cox_raw)
+
+```
+
+
+```{r}
+
+lp_raw_val <- predict(cox_raw, newdata = cox_baseline_val, type = "lp")
+
+concordance(
+  Surv(duration_hours_from_24h, event_after_24h) ~ lp_raw_val,
+  data = cox_baseline_val,
+  reverse = TRUE
+)
+
+time_roc_baseline <- timeROC(
+  T = risk_timeperiod_val$duration_hours_from_24h,
+  delta = risk_timeperiod_val$event_after_24h,
+  marker = lp_raw_val,
+  cause = 1,
+  times = c(48, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_baseline$AUC
+
+```
+
+
+## Age Ablation
+
+Analysis to check influence of age in survival model
+
+```{r}
+
+raw_vars2 <- c(
+  "gender",
+  "heart_rate_mean",
+  "resp_rate_mean",
+  "sbp_mean",
+  "dbp_mean",
+  "mbp_mean",
+  "spo2_mean",
+  "temperature_mean",
+  "glucose_max",
+  "creatinine_max",
+  "bicarbonate_min",
+  "lactate_max",
+  "sodium_min",
+  "potassium_max",
+  "platelet_min",
+  "wbc_max",
+  "hemoglobin_min"
+)
+
+form_raw2 <- as.formula(
+  paste(
+    "Surv(duration_hours_from_24h, event_after_24h) ~",
+    paste(raw_vars2, collapse = " + ")
+  )
+)
+
+cox_raw2 <- coxph(form_raw2, data = cox_baseline_train)
+summary(cox_raw2)
+
+```
+
+```{r}
+
+lp_raw_val2 <- predict(cox_raw2, newdata = cox_baseline_val, type = "lp")
+
+concordance(
+  Surv(duration_hours_from_24h, event_after_24h) ~ lp_raw_val2,
+  data = cox_baseline_val,
+  reverse = TRUE
+)
+
+time_roc_baseline2 <- timeROC(
+  T = risk_timeperiod_val$duration_hours_from_24h,
+  delta = risk_timeperiod_val$event_after_24h,
+  marker = lp_raw_val2,
+  cause = 1,
+  times = c(48, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_baseline2$AUC
+
+```
+
+
+```{r}
+
+mimic_clean_train2 <- mimic_clean_train%>%select(-anchor_age)
+
+mimic_clean_val2 <- mimic_clean_val%>%select(-anchor_age)
+
+```
+
+
+```{r}
+
+spec2 <- risk_spec(
+   y_col="mortality", positive="1",
+   features = setdiff(names(mimic_clean_train2), c("mortality", "stay_id")),
+   alpha = alpha,
+   laplace = 1, ridge = 1e-3, winsor_p=0.01,
+   weights=FALSE,
+   weight_method = "mutual_info",
+   numeric_candidates = c("gaussian", "lognormal", "gamma"),
+   count_candidates = c("poisson", "negbinom"),
+   fraction_candidates = c("logit_gaussian"),
+   fraction_eps = 1e-3,
+   numeric_val_frac = 0.2,
+   numeric_min_n = 25,
+   llr_cap_quantile = 0.01,
+   mi_nbins = 10
+ )
+
+obj2 <- fit(mimic_clean_train2%>%dplyr::select(-stay_id), spec2, k_eigen=4, k_energy=4, energy_ref="both")
+
+
+```
+
+### Compute Log-Likelihood Ratio (LLR) Matrix for Validation Set. Compute geometric risk signals
+
+```{r}
+
+Lval2 <- loglik_matrices(mimic_clean_val2%>%dplyr::select(-stay_id), obj2$fit, alpha=spec2$alpha)
+# val/test scoring
+scores_val2 <- bind_cols(stay_id=mimic_clean_val2$stay_id, 
+                            mortality=mimic_clean_val2$mortality, 
+                            score_risk(Lval2$l_pos, Lval2$l_neg,  obj2$fit$weights, obj2$geom, 
+                                       spec2$alpha, spec2$eps))
+
+
+```
+
+### Train Random Forest on Train Set
+
+```{r}
+
+rf_train_2 <- ranger(formula = mortality ~ ., data=mimic_clean_train2%>%dplyr::select(-stay_id),
+                         mtry=10, min.node.size=7, num.trees=500, probability = TRUE,
+                         keep.inbag = TRUE)
+
+```
+
+### Append RF predictions on Validation set to geometric risk dataframe
+
+```{r}
+
+scores_val2 <- bind_cols(scores_val2,
+                            p = predict(rf_train_2, mimic_clean_val2%>%dplyr::select(-stay_id, -mortality))$predictions[,"1"])
+
+```
+
+
+
+```{r}
+
+ggplot(scores_val2) +
+  geom_density(aes(x=p, fill=mortality), alpha=0.6) +
+  xlab("Random Forest probability of mortality") +
+  theme_minimal()
+
+ggplot(scores_val2) +
+  geom_density(aes(x=l, fill=mortality), alpha=0.6) +
+  xlab("Sum of relative marginal evidence from all features") +
+  theme_minimal()
+
+ggplot(scores_val2) +
+  geom_density(aes(x=d_dist, fill=mortality), alpha=0.6) +
+  xlab("d_dist") +
+  theme_minimal()
+
+ggplot(scores_val2) +
+  geom_density(aes(x=proj, fill=mortality), alpha=0.6) +
+  xlab("proj") +
+  theme_minimal()
+
+ggplot(scores_val2) +
+  geom_point(aes(x=l, y=p, color=mortality), alpha=0.4) +
+  ylab("Random forest mortality probability (p)") +
+  theme_minimal()
+
+ggplot(scores_val2) +
+  geom_point(aes(x=qlogis(p), y=l, color=mortality), alpha=0.4) +
+  xlab("log-odds of random forest mortality probability (p)") +
+  theme_minimal()
+
+ggplot(scores_val2) +
+  geom_point(aes(x=p, y=d_dist, color=mortality), alpha=0.4) +
+  xlab("Random forest mortality probability (p)") +
+  theme_minimal()
+
+ggplot(scores_val2) +
+  geom_point(aes(x=p, y=proj, color=mortality), alpha=0.4) +
+  xlab("Random forest mortality probability (p)") +
+  theme_minimal()
+
+ggplot(scores_val2) +
+  geom_point(aes(x=d_dist, y=proj, color=mortality), alpha=0.4) +
+  theme_minimal()
+
+ggplot(scores_val2%>%filter(d_dist > -4, d_dist < 4)) +
+  geom_point(aes(x=d_dist, y=proj, color=mortality), alpha=0.4) +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+
+Ltrain2 <- loglik_matrices(mimic_clean_train2%>%dplyr::select(-stay_id), obj2$fit, alpha=spec2$alpha)
+
+scores_train2 <- bind_cols(stay_id=mimic_clean_train2$stay_id, 
+                            mortality=mimic_clean_train2$mortality, 
+                            score_risk(Ltrain2$l_pos, Ltrain2$l_neg,  obj2$fit$weights, obj2$geom, 
+                                       spec2$alpha, spec2$eps))
+
+```
+
+```{r}
+
+interp_out2 <- append_interpretability_scores(
+  scores_train = scores_train2,
+  scores_val = scores_val2,
+  ll_train = Ltrain2,
+  ll_val = Lval2,
+  stable_idx = scores_train2$d_dist < 0,
+  normalize_family = TRUE,
+  normalize_overall = TRUE,
+  min_iqr = 1e-4
+)
+
+scores_train2 <- interp_out2$scores_train
+scores_val2   <- interp_out2$scores_val
+
+scores_val2 <- append_family_summaries(
+  scores_val = scores_val2,
+  family_axis_cols = interp_out2$family_axis_cols,
+  family_pct_cols = interp_out2$family_pct_cols
+)
+
+scores_val2 <- append_risk_profile(
+  scores_val = scores_val2,
+  family_axis_cols = interp_out2$family_axis_cols,
+  family_pct_cols = interp_out2$family_pct_cols,
+  top_n_families = 3,
+  d_dist_low_cut = 0,
+  d_dist_high_cut = 2,
+  score_digits = 2,
+  pct_digits = 0
+)
+
+```
+
+
+```{r}
+
+
+
+```
+
+```{r}
+
+risk_timeperiod_train2 <- left_join(scores_train2, mimiciv_timeperiod, by=join_by(stay_id))%>%dplyr::select(all_of(c(names(scores_train2), "duration_hours_from_24h", "event_after_24h")))
+
+risk_timeperiod_val2 <- left_join(scores_val2, mimiciv_timeperiod, by=join_by(stay_id))%>%dplyr::select(all_of(c(names(scores_val2), "duration_hours_from_24h", "event_after_24h")))
+
+```
+
+```{r}
+
+cox_spline1_no_age <- cph(
+  Surv(duration_hours_from_24h, event_after_24h) ~ 
+    rcs(d_dist, 4) +
+    gender_axis +
+    bicarbonate_axis +
+    resp_rate_axis +
+    lactate_axis +
+    creatinine_axis +
+    platelet_axis +
+    spo2_axis + 
+    sbp_axis +
+    temperature_axis,
+  data = risk_timeperiod_train2,
+  x = TRUE,
+  y = TRUE,
+  surv = TRUE
+)
+
+```
+
+
+
+
+```{r}
+
+lp_spline_no_age_train_raw <- predict(cox_spline1_no_age, newdata = risk_timeperiod_train2, type = "lp")
+lp_spline_no_age_val_raw   <- predict(cox_spline1_no_age, newdata = risk_timeperiod_val2,   type = "lp")
+
+```
+
+
+```{r}
+
+lp_spline_no_age_anchor <- mean(lp_spline_no_age_train_raw[risk_timeperiod_train2$d_dist < 0], na.rm = TRUE)
+
+risk_timeperiod_val2$lp_spline_no_age_rel <- lp_spline_no_age_val_raw - lp_spline_no_age_anchor
+
+```
+
+
+```{r}
+
+# Concordance
+concordance(Surv(duration_hours_from_24h, event_after_24h) ~ risk_timeperiod_val2$lp_spline_no_age_rel, 
+            data = risk_timeperiod_val2, reverse = TRUE)
+
+# timeROC
+time_roc_spline_no_age <- timeROC(
+  T = risk_timeperiod_val2$duration_hours_from_24h,
+  delta = risk_timeperiod_val2$event_after_24h,
+  marker = risk_timeperiod_val2$lp_spline_no_age_rel,
+  cause = 1,
+  times = c(48, 60, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_spline_no_age$AUC
+
+```
+
+
+## ICU Scores Comparison
+
+```{r}
+
+mimiciv_icu_scores <- read.csv(here("v2","src","data","mimiciv","mimiciv_ext_icu_scores.csv"))
+
+```
+
+```{r}
+
+mortality <- mimiciv_import%>%dplyr::select(stay_id, mortality)
+
+```
+
+
+```{r}
+
+mimiciv_icu_scores <- left_join(mimiciv_icu_scores, cohort_age, by=join_by(stay_id))
+
+mimiciv_icu_scores <- left_join(mimiciv_icu_scores, mimiciv_timeperiod, by=join_by(stay_id))
+
+```
+
+
+```{r}
+
+mimiciv_icu_scores_train <- inner_join(mimic_clean_train%>%dplyr::select(stay_id), mimiciv_icu_scores, by=join_by(stay_id))
+
+```
+
+```{r}
+
+mimiciv_icu_scores_val <- inner_join(mimic_clean_val%>%dplyr::select(stay_id), mimiciv_icu_scores, by=join_by(stay_id))
+
+```
+
+### SAPSII
+
+```{r}
+
+surv_sapsii <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ sapsii, data = mimiciv_icu_scores_train)
+summary(surv_sapsii)
+lp_surv_sapsii <- predict(surv_sapsii, newdata = mimiciv_icu_scores_val, type = "lp")
+
+concordance(
+  Surv(duration_hours_from_24h, event_after_24h) ~ lp_surv_sapsii,
+  data = mimiciv_icu_scores_val,
+  reverse = TRUE
+)
+
+time_roc_sapsii <- timeROC(
+  T = mimiciv_icu_scores_val$duration_hours_from_24h,
+  delta = mimiciv_icu_scores_val$event_after_24h,
+  marker = lp_surv_sapsii,
+  cause = 1,
+  times = c(48, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_sapsii$AUC
+
+```
+
+### APSIII
+
+```{r}
+
+surv_apsiii <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ anchor_age + apsiii, data = mimiciv_icu_scores_train)
+summary(surv_apsiii)
+lp_surv_apsiii <- predict(surv_apsiii, newdata = mimiciv_icu_scores_val, type = "lp")
+
+concordance(
+  Surv(duration_hours_from_24h, event_after_24h) ~ lp_surv_apsiii,
+  data = mimiciv_icu_scores_val,
+  reverse = TRUE
+)
+
+time_roc_apsiii <- timeROC(
+  T = mimiciv_icu_scores_val$duration_hours_from_24h,
+  delta = mimiciv_icu_scores_val$event_after_24h,
+  marker = lp_surv_apsiii,
+  cause = 1,
+  times = c(48, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_apsiii$AUC
+
+```
+
+### OASIS
+
+```{r}
+
+surv_oasis <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ oasis, data = mimiciv_icu_scores_train)
+summary(surv_oasis)
+lp_surv_oasis <- predict(surv_oasis, newdata = mimiciv_icu_scores_val, type = "lp")
+
+concordance(
+  Surv(duration_hours_from_24h, event_after_24h) ~ lp_surv_oasis,
+  data = mimiciv_icu_scores_val,
+  reverse = TRUE
+)
+
+time_roc_oasis <- timeROC(
+  T = mimiciv_icu_scores_val$duration_hours_from_24h,
+  delta = mimiciv_icu_scores_val$event_after_24h,
+  marker = lp_surv_oasis,
+  cause = 1,
+  times = c(48, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_oasis$AUC
+
+```
+
+### SIRS
+
+```{r}
+
+surv_sirs <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ anchor_age + sirs, data = mimiciv_icu_scores_train)
+summary(surv_sirs)
+lp_surv_sirs <- predict(surv_sirs, newdata = mimiciv_icu_scores_val, type = "lp")
+
+concordance(
+  Surv(duration_hours_from_24h, event_after_24h) ~ lp_surv_sirs,
+  data = mimiciv_icu_scores_val,
+  reverse = TRUE
+)
+
+time_roc_sirs <- timeROC(
+  T = mimiciv_icu_scores_val$duration_hours_from_24h,
+  delta = mimiciv_icu_scores_val$event_after_24h,
+  marker = lp_surv_sirs,
+  cause = 1,
+  times = c(48, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_sirs$AUC
+
+```
+
+### LODS
+
+```{r}
+
+surv_lods <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ anchor_age + lods, data = mimiciv_icu_scores_train)
+summary(surv_lods)
+lp_surv_lods <- predict(surv_lods, newdata = mimiciv_icu_scores_val, type = "lp")
+
+concordance(
+  Surv(duration_hours_from_24h, event_after_24h) ~ lp_surv_lods,
+  data = mimiciv_icu_scores_val,
+  reverse = TRUE
+)
+
+time_roc_lods <- timeROC(
+  T = mimiciv_icu_scores_val$duration_hours_from_24h,
+  delta = mimiciv_icu_scores_val$event_after_24h,
+  marker = lp_surv_lods,
+  cause = 1,
+  times = c(48, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_lods$AUC
+
+```
+
+### SOFA
+
+```{r}
+
+surv_sofa <- coxph(Surv(duration_hours_from_24h, event_after_24h) ~ anchor_age + sofa_24hours, data = mimiciv_icu_scores_train)
+summary(surv_sofa)
+lp_surv_sofa <- predict(surv_sofa, newdata = mimiciv_icu_scores_val, type = "lp")
+
+concordance(
+  Surv(duration_hours_from_24h, event_after_24h) ~ lp_surv_sofa,
+  data = mimiciv_icu_scores_val,
+  reverse = TRUE
+)
+
+time_roc_sofa <- timeROC(
+  T = mimiciv_icu_scores_val$duration_hours_from_24h,
+  delta = mimiciv_icu_scores_val$event_after_24h,
+  marker = lp_surv_sofa,
+  cause = 1,
+  times = c(48, 72, 96, 168),
+  iid = FALSE
+)
+
+time_roc_sofa$AUC
+
+```
+
+
+## SURVIVAL ANALYSIS TABLE
+
+
+```{r}
+
+survival_analysis_table <-
+  data.frame(
+    method = c("Age", "SAPSII", "APSIII + Age", "OASIS", "SIRS + Age", "LODS + Age", "SOFA 24h + Age", "Raw Measurement Subset",
+               "d_dist", "d_dist + Measurement Groups", "Spline(d_dist)", "Spline(d_dist) + Measurement Groups"),
+    concordance = c(0.6182, 0.7687, 0.7657, 0.7377, 0.6636, 0.7524, 0.7344, 0.7444, 0.7646, 0.7768, 0.7646, 0.7911),
+    AUROC_48h = c(0.621, 0.821, 0.815, 0.800, 0.689, 0.788, 0.771, 0.807, 0.836, 0.836, 0.836, 0.857),
+    AUROC_72h = c(0.622, 0.802, 0.791, 0.774, 0.672, 0.787, 0.751, 0.788, 0.813, 0.814, 0.813, 0.835),
+    AUROC_96h = c(0.616, 0.774, 0.766, 0.752, 0.663, 0.750, 0.730, 0.760, 0.778, 0.788, 0.778, 0.805),
+    AUROC_168h = c(0.630, 0.733, 0.737, 0.698, 0.661, 0.722, 0.712, 0.729, 0.713, 0.747, 0.713, 0.754)
+  )
+
+survival_analysis_table
+
+```
+
+
+Raw Feature Subset: c(
+  "anchor_age",
+  "gender",
+  "heart_rate_mean",
+  "resp_rate_mean",
+  "sbp_mean",
+  "dbp_mean",
+  "mbp_mean",
+  "spo2_mean",
+  "temperature_mean",
+  "glucose_max",
+  "creatinine_max",
+  "bicarbonate_min",
+  "lactate_max",
+  "sodium_min",
+  "potassium_max",
+  "platelet_min",
+  "wbc_max",
+  "hemoglobin_min"
+)
+
+
+```{r}
+
+risk_timeperiod_val$risk_group_spline <- cut(risk_timeperiod_val$lp_spline_rel,
+                      breaks = quantile(risk_timeperiod_val$lp_spline_rel, probs = c(0, 0.25, 0.5, 0.75, 1)),
+                      include.lowest = TRUE)
+
+risk_fit_spline_val <- survfit(Surv(duration_hours_from_24h, event_after_24h) ~ risk_group_spline, data = risk_timeperiod_val)
+plot(risk_fit_spline_val, col = 1:4, lwd = 2)
+
+```
+
+```{r}
+
+cox.zph(cox_spline1)
+
+```
+
+```{r}
+
+table(risk_timeperiod_val$risk_group_spline, risk_timeperiod_val$event_after_24h)
+
+```
+
+
+
+
+## Random Forest Performance Enhancement Analysis
+
+Analysis of performance of random forest when trained on evidence data
+
+```{r}
+
+rf_train_3 <- ranger(formula = mortality ~ ., data = bind_cols(mortality=mimic_clean_train$mortality, Ltrain$L),
+                     mtry=10, min.node.size=7, num.trees=500, probability = TRUE,
+                     keep.inbag = TRUE)
+
+```
+
+
+```{r}
+
+rf_on_evidence_val <- bind_cols(mortality=mimic_clean_val$mortality, p=predict(rf_train_3, Lval$L)$predictions[,"1"])
+
+```
+
+
+```{r}
+
+rf_on_evidence_val %>% ggplot(aes(x=p, fill=mortality)) + geom_density(alpha=0.6) + theme_minimal()
+
+```
+
+
+```{r}
+
+pROC::roc(rf_on_evidence_val$mortality, rf_on_evidence_val$p)
+
+```
+
+
+## Risk Decomposition Plots - Hazard Ratio
+
+
+```{r}
+
+terms_mat <- predict(cox_spline1, newdata = risk_timeperiod_val, type = "terms")
+
+```
+
+
+```{r}
+
+i <- match("0", (scores_val%>%filter(d_dist >= 0 & d_dist < 2))$mortality)
+patient_terms <- terms_mat[i, ]
+patient_terms
+
+```
+
+```{r}
+
+patient_hr <- exp(patient_terms)
+patient_hr
+
+```
+
+```{r}
+
+haz_df <- tibble(
+  term = names(patient_terms),
+  log_hazard_contrib = as.numeric(patient_terms)
+) %>%
+  mutate(
+    hazard_multiplier = exp(log_hazard_contrib)
+  ) %>%
+  arrange(log_hazard_contrib)
+
+```
+
+
+```{r}
+
+ggplot(haz_df, aes(x = reorder(term, hazard_multiplier), y = hazard_multiplier)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Patient-level Hazard Multipliers",
+    x = NULL,
+    y = "Hazard multiplier"
+  )
+
+```
+
+```{r}
+
+j <- match("1", (scores_val%>%filter(d_dist >= 0 & d_dist < 2))$mortality)
+
+patient_terms2 <- terms_mat[j, ]
+patient_terms2
+
+haz_df2 <- tibble(
+  term = names(patient_terms2),
+  log_hazard_contrib = as.numeric(patient_terms2)
+) %>%
+  mutate(
+    hazard_multiplier = exp(log_hazard_contrib)
+  ) %>%
+  arrange(log_hazard_contrib)
+
+```
+
+```{r}
+
+ggplot(haz_df2, aes(x = reorder(term, hazard_multiplier), y = hazard_multiplier)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Patient-level Hazard Multipliers",
+    x = NULL,
+    y = "Hazard multiplier"
+  )
+
+```
+
+
+## References
+
+Johnson, A., Bulgarelli, L., Pollard, T., Gow, B., Moody, B., Horng, S., Celi, L. A., & Mark, R. (2024). MIMIC-IV (version 3.1). PhysioNet. RRID:SCR_007345. https://doi.org/10.13026/kpb9-mt58  
+  
+Johnson, A.E.W., Bulgarelli, L., Shen, L. et al. MIMIC-IV, a freely accessible electronic health record dataset. Sci Data 10, 1 (2023). https://doi.org/10.1038/s41597-022-01899-x  
+  
+Goldberger, A., Amaral, L., Glass, L., Hausdorff, J., Ivanov, P. C., Mark, R., ... & Stanley, H. E. (2000). PhysioBank, PhysioToolkit, and PhysioNet: Components of a new research resource for complex physiologic signals. Circulation [Online]. 101 (23), pp. e215–e220. RRID:SCR_007345.  
+  
+https://zenodo.org/records/15272720  
+  
+Alistair E W Johnson, David J Stone, Leo A Celi, Tom J Pollard, The MIMIC Code Repository: enabling reproducibility in critical care research, Journal of the American Medical Informatics Association, Volume 25, Issue 1, January 2018, Pages 32–39, https://doi.org/10.1093/jamia/ocx084  
+  
