@@ -1,9 +1,98 @@
 # Interpretable ICU mortality risk modeling and survival analysis using probabilistic modeling
 
+## Project Overview
+
 This project develops interpretable mortality risk models using ICU electronic health record (EHR) data from the MIMIC-IV database. The goal is to transform heterogeneous clinical measurements into interpretable probabilistic risk signals and evaluate their usefulness for mortality risk stratification and time-to-event analysis.  
   
 The project combines probabilistic modeling, machine learning, and survival analysis to study how mortality risk evolves after the first 24 hours of ICU admission and compares the approach against established ICU severity scores.  
 
 This project uses the Evidence Geometry probabilistic framework developed here:
 [https://github.com/TheFifthPostulate/evidence-geometry](https://github.com/TheFifthPostulate/evidence-geometry)  
+
+## Data Sources
+
+Data source: MIMIC-IV ICU database  
+Features: 24-hour aggregated vitals, laboratory measurements, and demographics  
+Outcome: Mortality and time-to-death after 24-hour landmark  
+Benchmark models: SOFA, SAPS II, OASIS, APS III, LODS, SIRS  
+
+## Pipeline Overview
+   
+Analytical pipeline:  
   
+1. Extract ICU cohort and clinical measurements using SQL (BigQuery)
+2. Perform data harmonization across multiple clinical tables
+3. Aggregate vitals and labs over first 24 hours
+4. Perform data cleaning and feature engineering
+5. Split data into Train / Validation / Test sets
+6. Fit marginal likelihood models on training data
+7. Transform features into log-likelihood ratio (LLR) evidence space
+8. Construct population-relative risk metric (d_dist)
+9. Train Random Forest model for predictive comparison
+10. Perform risk stratification and mortality rate analysis
+11. Perform survival analysis (Kaplan–Meier, Cox models)
+12. Benchmark against ICU severity scores
+
+Engineered Features:  
+Number of measurements, measurement missing indicator, min, max, mean, median, IQR, early mean (before 12h), late mean (after 12h), Number occurrences below safe lower bound for measurement, Number occurrences above safe upper bound for measurement, Number in low/med/high bins, Measurement entropy using counts in low/med/high bins, Fraction of occurrences below safe lower bound, and Fraction of occurrences above safe upper bound  
+  
+Methods used:
+
+- SQL / BigQuery for cohort extraction and feature construction
+- R for statistical modeling and analysis
+- Probabilistic modeling using marginal likelihood models
+- Machine learning (Random Forest)
+- Survival analysis (Kaplan–Meier, Cox proportional hazards)
+- Risk stratification and calibration analysis
+
+## Key Results
+
+### Risk Score Distribution
+
+![Density plot of population-relative risk score d_dist](plots/d_dist_dens_val.png)  
+  
+![Density plot of Random Forest Probability of mortality](plots/rf_dens_val.png)  
+
+### d_dist vs Mortality Rate
+
+![d_dist vs Mortality Rate](plots/d_dist_mort_rate_val.png)  
+
+### Primary Risk Stratification (population-relative)
+Low Risk : d_dist < 0  
+Ambiguous Risk : 0 <= d_dist < 2  
+High Risk : d_dist >= 2  
+
+![Primary Risk Stratification Table (Test Set)](plots/primary_risk_strat.png)  
+
+### Cox Regression Model using evidence geometry
+
+Model : Spline(d_dist) + Measurement Groups  
+  
+Measurement Groups were created by adding positive evidence (log-likelihood ratios) of all features within every measurement type such as resp_rate, spo2, etc.  
+  
+![Kaplan-Meier Curves of Cox Regression Model by quantiles of Log-Hazard Ratio (0-25%, 25-50%, 50-75%, 75-100%)](plots/km_curve_spline_model_quantiles.png)  
+
+![d_dist vs Log-Hazard Ratio](plots/d_dist_hazard.png)  
+  
+### Comparision with ICU Severity Scores
+
+![Benchmarking evidence geometry against ICU severity scores](plots/survival_analysis_table.png)  
+
+### Risk Decomposition
+
+#### Example : Survived Patient
+
+![Total positive evidence and dominant measurement groups](plots/mort_0_risk_decomp.png)  
+
+![Hazard Ratio Decomposition](plots/mort_0_hr_decomp.png)  
+
+#### Example : Deceased Patient
+
+![Total positive evidence and dominant measurement groups](plots/mort_1_risk_decomp.png)  
+
+![Hazard Ratio Decomposition](plots/mort_1_hr_decomp.png)    
+  
+## Key Takeaways
+- Population-relative risk score d_dist strongly stratifies mortality risk
+- Survival models based on interpretable risk features perform comparably or better than ICU severity scores
+- Risk can be directly decomposed into physiologic drivers and feature-level contributions
