@@ -97,3 +97,16 @@ Measurement Groups were created by adding positive evidence (log-likelihood rati
 - Population-relative risk score d_dist strongly stratifies mortality risk
 - Survival models based on interpretable risk features perform comparably or better than ICU severity scores
 - Risk can be directly decomposed into physiologic drivers and feature-level contributions
+
+## References
+
+- Johnson, A., Bulgarelli, L., Pollard, T., Gow, B., Moody, B., Horng, S., Celi, L. A., & Mark, R. (2024). MIMIC-IV (version 3.1). PhysioNet. RRID:SCR_007345. https://doi.org/10.13026/kpb9-mt58  
+  
+- Johnson, A.E.W., Bulgarelli, L., Shen, L. et al. MIMIC-IV, a freely accessible electronic health record dataset. Sci Data 10, 1 (2023). https://doi.org/10.1038/s41597-022-01899-x  
+  
+- Goldberger, A., Amaral, L., Glass, L., Hausdorff, J., Ivanov, P. C., Mark, R., ... & Stanley, H. E. (2000). PhysioBank, PhysioToolkit, and PhysioNet: Components of a new research resource for complex physiologic signals. Circulation [Online]. 101 (23), pp. e215–e220. RRID:SCR_007345.  
+  
+- [https://zenodo.org/records/15272720](https://zenodo.org/records/15272720)  
+  
+- Alistair E W Johnson, David J Stone, Leo A Celi, Tom J Pollard, The MIMIC Code Repository: enabling reproducibility in critical care research, Journal of the American Medical Informatics Association, Volume 25, Issue 1, January 2018, Pages 32–39, https://doi.org/10.1093/jamia/ocx084  
+  
