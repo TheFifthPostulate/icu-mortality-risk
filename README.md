@@ -50,16 +50,16 @@ Methods used:
 
 ### Risk Score Distribution
 
-![Density plot of population-relative risk score d_dist](plots/d_dist_dens_val.png)  
-*Density plot of population-relative risk score d_dist*  
+#### Density plot of population-relative risk score d_dist
+![Density plot of population-relative risk score d_dist](plots/d_dist_dens_val.png)    
   
+#### Density plot of Random Forest Probability of mortality
 ![Density plot of Random Forest Probability of mortality](plots/rf_dens_val.png)  
-*Density plot of Random Forest Probability of mortality*
+
   
 ### d_dist vs Mortality Rate
 
-![d_dist vs Mortality Rate](plots/d_dist_mort_rate_val.png)  
-*d_dist vs Mortality Rate*  
+![d_dist vs Mortality Rate](plots/d_dist_mort_rate_val.png)   
   
 ### Primary Risk Stratification (population-relative)
 Low Risk : d_dist < 0  
@@ -74,36 +74,41 @@ High Risk : d_dist >= 2
 Model : log-Hazard Ratio \~ Spline(d_dist) + Measurement Groups  
   
 Measurement Groups were created by adding positive evidence (log-likelihood ratios) of all features within every measurement type such as resp_rate, spo2, etc.  
-  
+
+#### Kaplan-Meier Curves of Cox Regression Model by quantiles of Log-Hazard Ratio (0-25%, 25-50%, 50-75%, 75-100%)  
 ![Kaplan-Meier Curves of Cox Regression Model by quantiles of Log-Hazard Ratio (0-25%, 25-50%, 50-75%, 75-100%)](plots/km_curve_spline_model_quantiles.png)  
-*Kaplan-Meier Curves of Cox Regression Model by quantiles of Log-Hazard Ratio (0-25%, 25-50%, 50-75%, 75-100%)*  
+ 
+#### d_dist vs Log-Hazard Ratio
   
 ![d_dist vs Log-Hazard Ratio](plots/d_dist_hazard.png)  
-*d_dist vs Log-Hazard Ratio*  
-  
+ 
 ### Comparision with ICU Severity Scores
 
-![Benchmarking evidence geometry against ICU severity scores](plots/survival_analysis_table.png)  
-*Benchmarking evidence geometry against ICU severity scores*  
+![Benchmarking evidence geometry against ICU severity scores](plots/survival_analysis_table.png)   
   
 ### Risk Decomposition
 
 #### Example : Survived Patient
 
+#### Total positive evidence and dominant measurement groups 
+
 ![Total positive evidence and dominant measurement groups](plots/mort_0_risk_decomp.png)  
-*Total positive evidence and dominant measurement groups*  
+
+#### Hazard Ratio Decomposition 
   
 ![Hazard Ratio Decomposition](plots/mort_0_hr_decomp.png)  
-*Hazard Ratio Decomposition*  
+ 
   
 #### Example : Deceased Patient
 
+#### Total positive evidence and dominant measurement groups 
+
 ![Total positive evidence and dominant measurement groups](plots/mort_1_risk_decomp.png)  
-*Total positive evidence and dominant measurement groups*  
+  
+#### Hazard Ratio Decomposition
   
 ![Hazard Ratio Decomposition](plots/mort_1_hr_decomp.png)    
-*Hazard Ratio Decomposition*  
-  
+ 
 ## Key Takeaways
 - Population-relative risk score d_dist strongly stratifies mortality risk
 - Survival models based on interpretable risk features perform comparably or better than ICU severity scores
