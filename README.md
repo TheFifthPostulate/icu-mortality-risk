@@ -90,6 +90,10 @@ Measurement Groups were created by adding positive evidence (log-likelihood rati
 
 #### Example : Survived Patient
 
+#### Survival Curve
+
+![Survival Curve](plots/surv_curve_0.png)
+  
 #### Total positive evidence and dominant measurement groups 
 
 ![Total positive evidence and dominant measurement groups](plots/mort_0_risk_decomp.png)  
@@ -101,6 +105,10 @@ Measurement Groups were created by adding positive evidence (log-likelihood rati
   
 #### Example : Deceased Patient
 
+#### Survival Curve
+
+![Survival Curve](plots/surv_curve_1.png)
+  
 #### Total positive evidence and dominant measurement groups 
 
 ![Total positive evidence and dominant measurement groups](plots/mort_1_risk_decomp.png)  
