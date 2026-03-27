@@ -81,7 +81,11 @@ Measurement Groups were created by adding positive evidence (log-likelihood rati
 #### d_dist vs Log-Hazard Ratio
   
 ![d_dist vs Log-Hazard Ratio](plots/d_dist_hazard.png)  
- 
+
+#### Survival Curves by d_dist group
+
+![Survival Curves by d_dist group](plots/surv_curves_group.png)  
+  
 ### Comparision with ICU Severity Scores
 
 ![Benchmarking evidence geometry against ICU severity scores](plots/survival_analysis_table.png)   
