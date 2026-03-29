@@ -61,13 +61,17 @@ Methods used:
 
 ![d_dist vs Mortality Rate](plots/d_dist_mort_rate_val.png)   
   
-### Primary Risk Stratification (population-relative)
+### Primary Risk Stratification (population-relative, Test Set)
 Low Risk : d_dist < 0  
 Ambiguous Risk : 0 <= d_dist < 2  
 High Risk : d_dist >= 2  
 
 ![Primary Risk Stratification Table (Test Set)](plots/primary_risk_strat.png)  
-*Primary Risk Stratification Table (Test Set)*
+
+### Kaplan-Meier Curves by d_dist Risk Group
+
+![Kaplan-Meier Curves by d_dist Risk Group](plots/d_dist_survminer_km_plot.png)  
+
   
 ### Cox Regression Model using evidence geometry
 
@@ -76,7 +80,7 @@ Model : log-Hazard Ratio \~ Spline(d_dist) + Measurement Groups
 Measurement Groups were created by adding positive evidence (log-likelihood ratios) of all features within every measurement type such as resp_rate, spo2, etc.  
 
 #### Kaplan-Meier Curves of Cox Regression Model by quantiles of Log-Hazard Ratio (0-25%, 25-50%, 50-75%, 75-100%)  
-![Kaplan-Meier Curves of Cox Regression Model by quantiles of Log-Hazard Ratio (0-25%, 25-50%, 50-75%, 75-100%)](plots/km_curve_spline_model_quantiles.png)  
+![Kaplan-Meier Curves of Cox Regression Model by quantiles of Log-Hazard Ratio (0-25%, 25-50%, 50-75%, 75-100%)](plots/cox_spline_survminer_km_plot.png)  
  
 #### d_dist vs Log-Hazard Ratio
   
