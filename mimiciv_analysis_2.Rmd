@@ -9,7 +9,6 @@ library(here)
 library(tibble)
 library(ranger)
 library(caret)
-library(ggplot2)
 library(pROC)
 
 source(here("v2","src","evidencegeom.R"))
@@ -20,6 +19,7 @@ library(survminer)
 library(timeROC)
 library(rms)
 library(dplyr)
+library(ggplot2)
 
 set.seed(42)
 
@@ -48,6 +48,19 @@ mimiciv_import$mortality <- as.factor(mimiciv_import$mortality)
 ```{r}
 
 mimiciv_import$gender <- as.factor(mimiciv_import$gender)
+
+```
+
+```{r}
+
+mimiciv_gcs <- read.csv(here("v2","src","data","mimiciv","mimiciv_ext_24h_gcs_features_wide.csv"))
+
+```
+
+
+```{r}
+
+mimiciv_import <- inner_join(mimiciv_import, mimiciv_gcs, by=join_by(stay_id))
 
 ```
 
@@ -180,7 +193,22 @@ mimic_clean <- mimiciv_import %>% dplyr::select(-all_of(drop_bin_cols))
 
 ```{r}
 
-mimic_clean <- mimic_clean%>%select(-all_of(c("spo2_high_count","spo2_high_frac")))
+sds <- apply(mimic_clean, 2, sd)
+# or simply sapply(df, sd)
+
+# 2. Find which columns have an SD of 0
+cols_with_zero_sd <- which(sds < 1e-4)
+
+# To get the names of these columns
+names(cols_with_zero_sd) 
+
+
+```
+
+
+```{r}
+
+mimic_clean <- mimic_clean%>%select(-all_of(c("spo2_high_count","spo2_high_frac","gcs_high_count","gcs_motor_high_count", "gcs_verbal_high_count", "gcs_eyes_high_count","gcs_high_frac","gcs_motor_high_frac","gcs_verbal_high_frac","gcs_eyes_high_frac" )))
 
 ```
 
@@ -268,6 +296,20 @@ scores_val <- bind_cols(scores_val,
 
 ```
 
+
+```{r}
+
+sds2 <- apply(Lval$L, 2, sd)
+# or simply sapply(df, sd)
+
+# 2. Find which columns have an SD of 0
+cols_with_zero_sd2 <- which(sds2 < 1e-4)
+
+# To get the names of these columns
+names(cols_with_zero_sd2) 
+
+
+```
 
 ### Check assigned marginal likelihood families and compare parameters against population statistics
 
@@ -1117,53 +1159,15 @@ scores_val%>%filter(d_dist >=0, d_dist < 5) %>% ggplot(aes(x=d_dist, y=pos_sum_s
 ```
 
 
-```{r}
-
-pos_sum_val_fit <- glm(pos_sum_stable_z ~ d_dist, data=scores_val)
-
-```
-
-```{r}
-
-summary(pos_sum_val_fit)
-
-```
-
-
-```{r}
-
-scores_val$pos_sum_cond <- predict(pos_sum_val_fit, scores_val)
-
-```
-
-```{r}
-
-scores_val$risk_axis_residual <- scores_val$pos_sum_stable_z - scores_val$pos_sum_cond
-
-```
-
-
-```{r}
-
-scores_val%>%filter(d_dist >=0, d_dist < 5) %>% ggplot(aes(x=d_dist, y=risk_axis_residual, color=mortality)) + geom_point(alpha=0.6) + theme_minimal()
-
-```
-
-```{r}
-
-scores_val %>% filter(d_dist >= 0, d_dist < 20) %>% mutate(d_dist_bin = cut(d_dist, breaks = seq(0, 20, by = 1))) %>% ggplot() +
-  geom_boxplot(aes(y=risk_axis_residual, x=d_dist_bin, color=mortality)) +
-  theme_minimal()
-
-```
-
-
 ## Risk Decomposition
 
 ```{r}
 
+i <- match("0", (scores_val%>%filter(d_dist < 0))$mortality)
 
-mort_0_example <- head(as.vector(head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="0"), 1))[grep("_(raw|axis)$", names(as.vector(head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="0"), 1))))], -2)
+i_stay_id <- (scores_val%>%filter(d_dist < 0))[i, "stay_id"]
+
+mort_0_example <- head(as.vector((scores_val%>%filter(d_dist < 0))[i, ])[grep("_(raw|axis)$", names(as.vector((scores_val%>%filter(d_dist < 0))[i, ])))], -2)
 
 mort_0_example <- mort_0_example[mort_0_example > 0]
 
@@ -1171,18 +1175,21 @@ mort_0_example <- mort_0_example[order(unlist(mort_0_example), decreasing = TRUE
 
 mort_0_example <- head(mort_0_example, 4)
 
-mort_0_example_caption <- head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="0"), 1)["risk_profile"]
+mort_0_example_caption <- (scores_val%>%filter(d_dist < 0))[i, "risk_profile"]
 
 barplot(as.numeric(mort_0_example), names.arg=names(mort_0_example))
-title(sub = "Geometry: ambiguous / monitor geometry (d_dist=0.58).\n Overall positive evidence: moderate (z=0.44).\n Positive evidence composition: spo2 (36%); mbp (18%); sbp (18%)")
+title(sub = "Geometry: stable / low-risk geometry (d_dist=-0.40). \n Overall positive evidence: low (z=-0.57). \n Positive evidence composition: spo2 (20%); heart_rate (18%); dbp (17%)")
 
 ```
 
 
 ```{r}
 
+j <- match("1", (scores_val%>%filter(d_dist >= 2))$mortality)
 
-mort_1_example <- head(as.vector(head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="1"), 1))[grep("_(raw|axis)$", names(as.vector(head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="1"), 1))))], -2)
+j_stay_id <- (scores_val%>%filter(d_dist >= 2))[j, "stay_id"]
+
+mort_1_example <- head(as.vector((scores_val%>%filter(d_dist >= 2))[j, ])[grep("_(raw|axis)$", names(as.vector((scores_val%>%filter(d_dist >= 2))[j, ])))], -2)
 
 mort_1_example <- mort_1_example[mort_1_example > 0]
 
@@ -1190,10 +1197,10 @@ mort_1_example <- mort_1_example[order(unlist(mort_1_example), decreasing = TRUE
 
 mort_1_example <- head(mort_1_example, 4)
 
-mort_1_example_caption <- head(scores_val%>%filter(d_dist >= 0 & d_dist < 2, mortality=="1"), 1)["risk_profile"]
+mort_1_example_caption <- (scores_val%>%filter(d_dist >= 2))[j,"risk_profile"]
 
 barplot(as.numeric(mort_1_example), names.arg=names(mort_1_example))
-title(sub = "Geometry: ambiguous / monitor geometry (d_dist=1.60).\n Overall positive evidence: high (z=3.35).\n Positive evidence composition: resp_rate (27%); heart_rate (20%); hemoglobin (11%).")
+title(sub = "Geometry: high-risk geometry (d_dist=5.66). \n Overall positive evidence: high (z=2.71). \n Positive evidence composition: gcs_eyes (36%); gcs_motor (23%); gcs_verbal (20%)")
 
 ```
 
@@ -1350,6 +1357,13 @@ scores_test %>% group_by(geometry_band) %>% dplyr::summarize(count = n(), mortal
 ```
 
 
+```{r}
+
+# gt::gtsave(gt::gt(scores_test %>% group_by(geometry_band) %>% dplyr::summarize(count = n(), mortality_rate = mean(mortality=="1"), percent_pop = n()/nrow(scores_test))), "primary_risk_strat.png")
+
+```
+
+
 ### Example Risk Profiles
 
 ```{r}
@@ -1374,11 +1388,22 @@ scores_test %>% mutate(p_bin = cut(p, breaks = 25)) %>%
 
 ```
 
-### RF mortality in matched low risk zone size (17.13%)
+### AUROC of RF p, d_dist
 
 ```{r}
 
-rf_matched_safe_zone <- head(scores_test%>%select(mortality, p)%>%arrange(p), round(nrow(scores_test)*0.1713065,0))
+pROC::roc(scores_test$mortality, scores_test$p)
+
+pROC::roc(scores_test$mortality, scores_test$d_dist)
+
+```
+
+
+### RF mortality in matched low risk zone size (29.6%)
+
+```{r}
+
+rf_matched_safe_zone <- head(scores_test%>%select(mortality, p)%>%arrange(p), round(nrow(scores_test)*0.296,0))
 
 ```
 
@@ -1395,11 +1420,11 @@ max(rf_matched_safe_zone$p)
 ```
 
 
-### RF mortality in matched high risk zone size (36.65%)
+### RF mortality in matched high risk zone size (35.7%)
 
 ```{r}
 
-rf_matched_highrisk_zone <- tail(scores_test%>%select(mortality, p)%>%arrange(p), round(0.3664862*nrow(scores_test),0))
+rf_matched_highrisk_zone <- tail(scores_test%>%select(mortality, p)%>%arrange(p), round(0.357*nrow(scores_test),0))
 
 ```
 
@@ -1491,11 +1516,24 @@ km_fit <- survfit(
   data = risk_timeperiod_train
 )
 
+```
+
+```{r}
+
 ggsurvplot(
   km_fit,
   data = risk_timeperiod_train,
   risk.table = TRUE,
-  pval = TRUE
+  pval = TRUE,
+  legend.labs = c("Low", "Ambiguous", "High"),
+  legend.title = "d_dist group",
+  xlab = "Hours from 24h landmark",
+  ylab = "Survival probability",
+  risk.table.y.text = FALSE,
+  risk.table.height = 0.35,
+  xlim = c(0, 720),
+  break.x.by = 168,
+  ylim = c(0.5, 1.0)
 )
 
 ```
@@ -1716,24 +1754,6 @@ time_roc$AUC
 
 ```
 
-```{r}
-
-risk_timeperiod_val$risk_group <- cut(risk_timeperiod_val$lp_rel,
-                      breaks = quantile(risk_timeperiod_val$lp_rel, probs = c(0, 0.25, 0.5, 0.75, 1)),
-                      include.lowest = TRUE)
-
-risk_fit_val <- survfit(Surv(duration_hours_from_24h, event_after_24h) ~ risk_group, data = risk_timeperiod_val)
-plot(risk_fit_val, col = 1:4, lwd = 2)
-
-```
-
-
-```{r}
-
-termplot(M_d_dist_composition, se = TRUE)
-
-```
-
 
 ```{r}
 
@@ -1746,32 +1766,8 @@ options(datadist = "dd")
 ```{r}
 
 cox_spline1 <- cph(
-  Surv(duration_hours_from_24h, event_after_24h) ~ 
-    rcs(d_dist, 4) +
-    anchor_age_axis +
-    gender_axis +
-    bicarbonate_axis +
-    resp_rate_axis +
-    lactate_axis +
-    creatinine_axis +
-    platelet_axis +
-    spo2_axis + 
-    sbp_axis +
-    temperature_axis,
-  data = risk_timeperiod_train,
-  x = TRUE,
-  y = TRUE,
-  surv = TRUE
-)
-
-```
-
-
-```{r}
-
-cox_spline2 <- cph(
-  Surv(duration_hours_from_24h, event_after_24h) ~ 
-    rcs(d_dist, 4),
+as.formula(paste("Surv(duration_hours_from_24h, event_after_24h) ~ rcs(d_dist, 4) +", 
+                             paste(names(scores_train)[grep("_axis", names(scores_train))], collapse = " + "), collapse='')),
   data = risk_timeperiod_train,
   x = TRUE,
   y = TRUE,
@@ -1794,15 +1790,6 @@ plot(Predict(cox_spline1, anchor_age_axis),
 plot(Predict(cox_spline1, resp_rate_axis), 
      xlab = "resp_rate_axis", 
      ylab = "Log-Hazard Ratio")
-
-```
-
-```{r}
-
-plot(Predict(cox_spline2, d_dist), 
-     xlab = "d_dist", 
-     ylab = "Log-Hazard Ratio")
-
 
 ```
 
@@ -1846,6 +1833,18 @@ time_roc_spline$AUC
 ```
 
 ### Spline(d_dist)
+
+```{r}
+
+cox_spline2 <- cph(
+Surv(duration_hours_from_24h, event_after_24h) ~ rcs(d_dist, 4),
+  data = risk_timeperiod_train,
+  x = TRUE,
+  y = TRUE,
+  surv = TRUE
+)
+
+```
 
 ```{r}
 
@@ -1907,26 +1906,7 @@ cox_baseline_val <- left_join(mimic_clean_val, mimiciv_timeperiod, by=join_by(st
 
 ```{r}
 
-raw_vars <- c(
-  "anchor_age",
-  "gender",
-  "heart_rate_mean",
-  "resp_rate_mean",
-  "sbp_mean",
-  "dbp_mean",
-  "mbp_mean",
-  "spo2_mean",
-  "temperature_mean",
-  "glucose_max",
-  "creatinine_max",
-  "bicarbonate_min",
-  "lactate_max",
-  "sodium_min",
-  "potassium_max",
-  "platelet_min",
-  "wbc_max",
-  "hemoglobin_min"
-)
+raw_vars <- names(mimic_clean[-c(1,2)])
 
 form_raw <- as.formula(
   paste(
@@ -1971,25 +1951,7 @@ Analysis to check influence of age in survival model
 
 ```{r}
 
-raw_vars2 <- c(
-  "gender",
-  "heart_rate_mean",
-  "resp_rate_mean",
-  "sbp_mean",
-  "dbp_mean",
-  "mbp_mean",
-  "spo2_mean",
-  "temperature_mean",
-  "glucose_max",
-  "creatinine_max",
-  "bicarbonate_min",
-  "lactate_max",
-  "sodium_min",
-  "potassium_max",
-  "platelet_min",
-  "wbc_max",
-  "hemoglobin_min"
-)
+raw_vars2 <- raw_vars[-2]
 
 form_raw2 <- as.formula(
   paste(
@@ -2098,53 +2060,9 @@ scores_val2 <- bind_cols(scores_val2,
 ```{r}
 
 ggplot(scores_val2) +
-  geom_density(aes(x=p, fill=mortality), alpha=0.6) +
-  xlab("Random Forest probability of mortality") +
-  theme_minimal()
-
-ggplot(scores_val2) +
-  geom_density(aes(x=l, fill=mortality), alpha=0.6) +
-  xlab("Sum of relative marginal evidence from all features") +
-  theme_minimal()
-
-ggplot(scores_val2) +
   geom_density(aes(x=d_dist, fill=mortality), alpha=0.6) +
   xlab("d_dist") +
   theme_minimal()
-
-ggplot(scores_val2) +
-  geom_density(aes(x=proj, fill=mortality), alpha=0.6) +
-  xlab("proj") +
-  theme_minimal()
-
-ggplot(scores_val2) +
-  geom_point(aes(x=l, y=p, color=mortality), alpha=0.4) +
-  ylab("Random forest mortality probability (p)") +
-  theme_minimal()
-
-ggplot(scores_val2) +
-  geom_point(aes(x=qlogis(p), y=l, color=mortality), alpha=0.4) +
-  xlab("log-odds of random forest mortality probability (p)") +
-  theme_minimal()
-
-ggplot(scores_val2) +
-  geom_point(aes(x=p, y=d_dist, color=mortality), alpha=0.4) +
-  xlab("Random forest mortality probability (p)") +
-  theme_minimal()
-
-ggplot(scores_val2) +
-  geom_point(aes(x=p, y=proj, color=mortality), alpha=0.4) +
-  xlab("Random forest mortality probability (p)") +
-  theme_minimal()
-
-ggplot(scores_val2) +
-  geom_point(aes(x=d_dist, y=proj, color=mortality), alpha=0.4) +
-  theme_minimal()
-
-ggplot(scores_val2%>%filter(d_dist > -4, d_dist < 4)) +
-  geom_point(aes(x=d_dist, y=proj, color=mortality), alpha=0.4) +
-  theme_minimal()
-
 
 ```
 
@@ -2198,12 +2116,6 @@ scores_val2 <- append_risk_profile(
 
 ```{r}
 
-
-
-```
-
-```{r}
-
 risk_timeperiod_train2 <- left_join(scores_train2, mimiciv_timeperiod, by=join_by(stay_id))%>%dplyr::select(all_of(c(names(scores_train2), "duration_hours_from_24h", "event_after_24h")))
 
 risk_timeperiod_val2 <- left_join(scores_val2, mimiciv_timeperiod, by=join_by(stay_id))%>%dplyr::select(all_of(c(names(scores_val2), "duration_hours_from_24h", "event_after_24h")))
@@ -2231,9 +2143,6 @@ cox_spline1_no_age <- cph(
 )
 
 ```
-
-
-
 
 ```{r}
 
@@ -2479,13 +2388,13 @@ time_roc_sofa$AUC
 
 survival_analysis_table <-
   data.frame(
-    method = c("Age", "SAPSII", "APSIII + Age", "OASIS", "SIRS + Age", "LODS + Age", "SOFA 24h + Age", "Raw Measurement Subset",
+    method = c("Age", "SAPSII", "APSIII + Age", "OASIS", "SIRS + Age", "LODS + Age", "SOFA 24h + Age", "Raw Features (All)",
                "d_dist", "d_dist + Measurement Groups", "Spline(d_dist)", "Spline(d_dist) + Measurement Groups"),
-    concordance = c(0.6182, 0.7687, 0.7657, 0.7377, 0.6636, 0.7524, 0.7344, 0.7444, 0.7646, 0.7768, 0.7646, 0.7911),
-    AUROC_48h = c(0.621, 0.821, 0.815, 0.800, 0.689, 0.788, 0.771, 0.807, 0.836, 0.836, 0.836, 0.857),
-    AUROC_72h = c(0.622, 0.802, 0.791, 0.774, 0.672, 0.787, 0.751, 0.788, 0.813, 0.814, 0.813, 0.835),
-    AUROC_96h = c(0.616, 0.774, 0.766, 0.752, 0.663, 0.750, 0.730, 0.760, 0.778, 0.788, 0.778, 0.805),
-    AUROC_168h = c(0.630, 0.733, 0.737, 0.698, 0.661, 0.722, 0.712, 0.729, 0.713, 0.747, 0.713, 0.754)
+    concordance = c(0.6027, 0.7545, 0.763, 0.7333, 0.6508, 0.7401, 0.7283, 0.7219, 0.7938, 0.805, 0.7938, 0.8141),
+    AUROC_48h = c(0.588, 0.814, 0.807, 0.794, 0.659, 0.774, 0.763, 0.789, 0.876, 0.869, 0.876, 0.887),
+    AUROC_72h = c(0.595, 0.788, 0.796, 0.768, 0.661, 0.761, 0.748, 0.770, 0.849, 0.851, 0.849, 0.866),
+    AUROC_96h = c(0.598, 0.770, 0.781, 0.750, 0.655, 0.746, 0.738, 0.767, 0.825, 0.834, 0.825, 0.847),
+    AUROC_168h = c(0.613, 0.716, 0.731, 0.691, 0.644, 0.704, 0.701, 0.733, 0.736, 0.767, 0.736, 0.767)
   )
 
 survival_analysis_table
@@ -2493,27 +2402,57 @@ survival_analysis_table
 ```
 
 
-Raw Feature Subset: c(
-  "anchor_age",
-  "gender",
-  "heart_rate_mean",
-  "resp_rate_mean",
-  "sbp_mean",
-  "dbp_mean",
-  "mbp_mean",
-  "spo2_mean",
-  "temperature_mean",
-  "glucose_max",
-  "creatinine_max",
-  "bicarbonate_min",
-  "lactate_max",
-  "sodium_min",
-  "potassium_max",
-  "platelet_min",
-  "wbc_max",
-  "hemoglobin_min"
-)
+```{r}
 
+gt::gtsave(gt::gt(survival_analysis_table), "survival_analysis_table.png")
+
+```
+
+
+```{r}
+
+survival_analysis_table %>% arrange(concordance, decreasing=TRUE) %>% ggplot() +
+  geom_col(aes(x=concordance, y=reorder(method, concordance))) +
+  scale_x_continuous(breaks=seq(0, 0.8, 0.05)) +
+  ylab("Method") +
+  theme_minimal()
+
+```
+
+
+```{r}
+
+survival_analysis_table_long <- 
+  survival_analysis_table %>% tidyr::pivot_longer(
+    cols = starts_with("AUROC_"),
+    names_to = "timepoint",
+    values_to = "auroc",
+    names_prefix = "AUROC_"
+  ) %>%
+  mutate(
+    hours = as.numeric(gsub("h", "", timepoint)),
+    method = reorder(method, -auroc, FUN = function(x) x[1])
+  ) %>%
+  arrange(hours, desc(auroc))
+
+```
+
+```{r}
+
+ggplot(survival_analysis_table_long, aes(x = hours, y = auroc, color = method, group = method)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(x = "Hours", y = "AUROC", color = "Method")
+
+```
+
+
+```{r}
+
+mimiciv_cohort %>% group_by(as.factor(event_after_24h)) %>% dplyr::summarize(surv_median = median(duration_hours_from_24h))
+
+```
 
 ```{r}
 
@@ -2522,7 +2461,26 @@ risk_timeperiod_val$risk_group_spline <- cut(risk_timeperiod_val$lp_spline_rel,
                       include.lowest = TRUE)
 
 risk_fit_spline_val <- survfit(Surv(duration_hours_from_24h, event_after_24h) ~ risk_group_spline, data = risk_timeperiod_val)
-plot(risk_fit_spline_val, col = 1:4, lwd = 2)
+
+```
+
+```{r}
+
+ggsurvplot(
+  risk_fit_spline_val,
+  data = risk_timeperiod_val,
+  risk.table = TRUE,
+  pval = TRUE,
+  legend.labs = c("Q1 (lowest risk)", "Q2", "Q3", "Q4 (highest risk)"),
+  legend.title = "Hazard quartile",
+  xlab = "Hours from 24h landmark",
+  ylab = "Survival probability",
+  risk.table.y.text = FALSE,
+  risk.table.height = 0.40,
+  xlim = c(0, 720),
+  break.x.by = 168,
+  ylim = c(0.5, 1.0)
+)
 
 ```
 
@@ -2539,42 +2497,6 @@ table(risk_timeperiod_val$risk_group_spline, risk_timeperiod_val$event_after_24h
 ```
 
 
-
-
-## Random Forest Performance Enhancement Analysis
-
-Analysis of performance of random forest when trained on evidence data
-
-```{r}
-
-rf_train_3 <- ranger(formula = mortality ~ ., data = bind_cols(mortality=mimic_clean_train$mortality, Ltrain$L),
-                     mtry=10, min.node.size=7, num.trees=500, probability = TRUE,
-                     keep.inbag = TRUE)
-
-```
-
-
-```{r}
-
-rf_on_evidence_val <- bind_cols(mortality=mimic_clean_val$mortality, p=predict(rf_train_3, Lval$L)$predictions[,"1"])
-
-```
-
-
-```{r}
-
-rf_on_evidence_val %>% ggplot(aes(x=p, fill=mortality)) + geom_density(alpha=0.6) + theme_minimal()
-
-```
-
-
-```{r}
-
-pROC::roc(rf_on_evidence_val$mortality, rf_on_evidence_val$p)
-
-```
-
-
 ## Risk Decomposition Plots - Hazard Ratio
 
 
@@ -2587,16 +2509,7 @@ terms_mat <- predict(cox_spline1, newdata = risk_timeperiod_val, type = "terms")
 
 ```{r}
 
-i <- match("0", (scores_val%>%filter(d_dist >= 0 & d_dist < 2))$mortality)
-patient_terms <- terms_mat[i, ]
-patient_terms
-
-```
-
-```{r}
-
-patient_hr <- exp(patient_terms)
-patient_hr
+patient_terms <- terms_mat[which(risk_timeperiod_val$stay_id == i_stay_id), ]
 
 ```
 
@@ -2629,10 +2542,7 @@ ggplot(haz_df, aes(x = reorder(term, hazard_multiplier), y = hazard_multiplier))
 
 ```{r}
 
-j <- match("1", (scores_val%>%filter(d_dist >= 0 & d_dist < 2))$mortality)
-
-patient_terms2 <- terms_mat[j, ]
-patient_terms2
+patient_terms2 <- terms_mat[which(risk_timeperiod_val$stay_id == j_stay_id), ]
 
 haz_df2 <- tibble(
   term = names(patient_terms2),
@@ -2657,6 +2567,165 @@ ggplot(haz_df2, aes(x = reorder(term, hazard_multiplier), y = hazard_multiplier)
   )
 
 ```
+
+
+## Survival Curves
+
+```{r}
+
+base_surv <- Survival(cox_spline1)
+
+time_grid <- seq(1, 200, by = 1)
+
+baseline_curve <- data.frame(
+  time = time_grid,
+  surv = base_surv(time_grid, lp = 0)
+)
+
+ggplot(baseline_curve, aes(x = time, y = surv)) +
+  geom_line() +
+  labs(
+    title = "Baseline Survival Curve (Cox Model)",
+    x = "Hours after 24h landmark",
+    y = "Baseline survival probability"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+
+surv_fun <- Survival(cox_spline1)
+time_grid <- seq(1, 250, by = 1)
+
+risk_timeperiod_val$lp <- predict(cox_spline1, newdata = risk_timeperiod_val, type = "lp")
+
+df_curves <- risk_timeperiod_val %>%
+  group_by(geometry_band) %>%
+  summarise(lp_mean = mean(lp)) %>%
+  rowwise() %>%
+  do(data.frame(
+    risk_bin = .$geometry_band,
+    time = time_grid,
+    surv = surv_fun(time_grid, lp = .$lp_mean)
+  ))
+
+ggplot(df_curves, aes(x = time, y = surv, color = factor(risk_bin))) +
+  geom_line(size = 1.2) +
+  labs(
+    title = "Predicted Survival Curves by Risk Group",
+    x = "Hours after 24h landmark",
+    y = "Predicted survival probability",
+    color = "Risk group"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+
+get_patient_surv_curve <- function(fit, newdata_row, time_grid) {
+  surv_fun <- Survival(fit)
+  lp <- predict(fit, newdata = newdata_row, type = "lp")
+  data.frame(
+    time = time_grid,
+    surv = surv_fun(time_grid, lp = lp)
+  )
+}
+
+```
+
+
+```{r}
+
+cox_spline1_curve_0 <- get_patient_surv_curve(
+  fit = cox_spline1,
+  newdata_row = risk_timeperiod_val[which(risk_timeperiod_val$stay_id == i_stay_id), ],
+  time_grid = seq(1, 240, by = 1)
+)
+
+```
+
+
+```{r}
+
+cox_spline1_curve_0 %>% ggplot() + geom_point(aes(x=time, y=surv)) + xlab("hours after 24h landmark") + theme_minimal()
+
+```
+
+
+```{r}
+
+cox_spline1_curve_1 <- get_patient_surv_curve(
+  fit = cox_spline1,
+  newdata_row = risk_timeperiod_val[which(risk_timeperiod_val$stay_id == j_stay_id), ],
+  time_grid = seq(1, 240, by = 1)
+)
+
+```
+
+
+```{r}
+
+cox_spline1_curve_1 %>% ggplot() + geom_point(aes(x=time, y=surv)) + xlab("hours after 24h landmark") + theme_minimal()
+
+```
+
+```{r}
+
+make_calibration_df <- function(fit, newdata, u = 96, n_bins = 5) {
+  library(rms)
+  library(dplyr)
+  library(survival)
+
+  sv <- survest(fit, newdata = newdata, times = u)
+
+  df <- newdata
+  df$pred_surv <- as.numeric(sv$surv)
+  df$pred_risk <- 1 - df$pred_surv
+  df$cal_bin <- ntile(df$pred_risk, n_bins)
+
+  km_surv_at_u <- function(df_bin, u) {
+    fit_km <- survfit(Surv(duration_hours_from_24h, event_after_24h) ~ 1, data = df_bin)
+    s <- summary(fit_km, times = u, extend = TRUE)$surv
+    if (length(s) == 0) return(NA_real_)
+    s[1]
+  }
+
+  df %>%
+    group_by(cal_bin) %>%
+    summarise(
+      n = n(),
+      mean_pred_surv = mean(pred_surv, na.rm = TRUE),
+      mean_pred_risk = mean(pred_risk, na.rm = TRUE),
+      obs_surv = km_surv_at_u(cur_data(), u),
+      .groups = "drop"
+    ) %>%
+    mutate(obs_risk = 1 - obs_surv)
+}
+
+```
+
+
+```{r}
+
+cal_96 <- make_calibration_df(cox_spline1, risk_timeperiod_val, u = 96, n_bins = 5)
+
+```
+
+
+```{r}
+
+cal_96 %>% ggplot() + 
+  geom_line(aes(x=cal_bin, y=mean_pred_surv), color="red") + 
+  geom_line(aes(x=cal_bin, y=obs_surv), color="blue") +
+  theme_minimal()
+
+```
+
+
 
 
 ## References
