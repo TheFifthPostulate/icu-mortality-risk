@@ -12,7 +12,7 @@ This project uses the Evidence Geometry probabilistic framework developed here:
 ## Data Sources
 
 Data source: MIMIC-IV ICU database  
-Features: 24-hour aggregated vitals, laboratory measurements, and demographics  
+Features: 24-hour aggregated vitals, laboratory measurements, gcs, and demographics  
 Outcome: Mortality and time-to-death after 24-hour landmark  
 Benchmark models: SOFA, SAPS II, OASIS, APS III, LODS, SIRS  
 
@@ -22,7 +22,7 @@ Analytical pipeline:
   
 1. Extract ICU cohort and clinical measurements using SQL (BigQuery)
 2. Perform data harmonization across multiple clinical tables
-3. Aggregate vitals and labs over first 24 hours
+3. Aggregate vitals, labs, and gcs over first 24 hours
 4. Perform data cleaning and feature engineering
 5. Split data into Train / Validation / Test sets
 6. Fit marginal likelihood models on training data
