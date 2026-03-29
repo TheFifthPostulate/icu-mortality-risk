@@ -89,10 +89,14 @@ Measurement Groups were created by adding positive evidence (log-likelihood rati
 ### Comparision with ICU Severity Scores
 
 ![Benchmarking evidence geometry against ICU severity scores](plots/survival_analysis_table.png)   
+
+![Concordance Plot](plots/concordance_plot.png)  
+  
+![TimeROC Plot](plots/timeROC_plot.png)  
   
 ### Risk Decomposition
 
-#### Example : Survived Patient
+#### Example : Survived Patient, Low Risk
 
 #### Survival Curve
 
@@ -107,7 +111,7 @@ Measurement Groups were created by adding positive evidence (log-likelihood rati
 ![Hazard Ratio Decomposition](plots/mort_0_hr_decomp.png)  
  
   
-#### Example : Deceased Patient
+#### Example : Deceased Patient, High Risk
 
 #### Survival Curve
 
