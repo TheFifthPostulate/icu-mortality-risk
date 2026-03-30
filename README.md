@@ -40,10 +40,10 @@ Methods used:
 
 - SQL / BigQuery for cohort extraction and feature construction
 - R for statistical modeling and analysis
-- Probabilistic modeling using marginal likelihood models
+- Probabilistic modeling
 - Machine learning (Random Forest)
 - Survival analysis (Kaplan–Meier, Cox proportional hazards)
-- Risk stratification and calibration analysis
+- Risk stratification and selective classification
 - AI/LLM-assisted rapid protyping and documentation
 
 ## Key Results
