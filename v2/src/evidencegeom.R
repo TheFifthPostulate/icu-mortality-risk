@@ -45,53 +45,6 @@ risk_spec <- function(y_col,
                       weights = FALSE,
                       weight_method = "mean_gap",
                       numeric_candidates = c("gaussian", "lognormal", "gamma"),
-                      numeric_val_frac = 0.2,
-                      numeric_min_n = 25,
-                      llr_cap_quantile = 0.01,
-                      mi_nbins = 10) {
-  list(
-    y_col = y_col,
-    positive = positive,
-    features = features,
-    alpha = alpha,
-    laplace = laplace,
-    numeric_min_sd = numeric_min_sd,
-    ridge = ridge,
-    winsor_p = winsor_p,
-    weights = weights,
-    weight_method = weight_method,
-    numeric_candidates = numeric_candidates,
-    numeric_val_frac = numeric_val_frac,
-    numeric_min_n = numeric_min_n,
-    llr_cap_quantile = llr_cap_quantile,
-    mi_nbins = mi_nbins
-  )
-}
-
-validate_spec <- function(df, spec) {
-  stopifnot(spec$y_col %in% names(df))
-  if (!is.null(spec$features)) {
-    missing <- setdiff(spec$features, names(df))
-    if (length(missing) > 0) stop("Missing features: ", paste(missing, collapse = ", "))
-  }
-  invisible(TRUE)
-}
-
-# ============================================================
-# 1) Fit class-conditional models for each feature P(X_i|Y)
-# ============================================================
-
-risk_spec <- function(y_col,
-                      positive,
-                      features = NULL,
-                      alpha = 0.5,
-                      laplace = 1,
-                      numeric_min_sd = 1e-6,
-                      ridge = 1e-6,
-                      winsor_p = 0.01,
-                      weights = FALSE,
-                      weight_method = "mean_gap",
-                      numeric_candidates = c("gaussian", "lognormal", "gamma"),
                       count_candidates = c("poisson", "negbinom"),
                       fraction_candidates = c("logit_gaussian"),
                       fraction_eps = 1e-6,
@@ -129,6 +82,11 @@ validate_spec <- function(df, spec) {
   }
   invisible(TRUE)
 }
+
+# ============================================================
+# 1) Fit class-conditional models for each feature P(X_i|Y)
+# ============================================================
+
 
 # ============================================================
 # Numeric / count / fraction likelihood model selection helpers
