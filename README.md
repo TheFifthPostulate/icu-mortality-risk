@@ -134,6 +134,10 @@ Measurement Groups were created by adding positive evidence (log-likelihood rati
 - Survival models based on interpretable risk features perform comparably or better than ICU severity scores
 - Risk can be directly decomposed into physiologic drivers and feature-level contributions
 
+## Future Work
+  
+External validation on eICU subsets.  
+
 ## References
 
 - Johnson, A., Bulgarelli, L., Pollard, T., Gow, B., Moody, B., Horng, S., Celi, L. A., & Mark, R. (2024). MIMIC-IV (version 3.1). PhysioNet. RRID:SCR_007345. https://doi.org/10.13026/kpb9-mt58  
