@@ -29,9 +29,10 @@ Analytical pipeline:
 7. Transform features into log-likelihood ratio (LLR) evidence space
 8. Construct population-relative risk metric (d_dist)
 9. Train Random Forest model for predictive comparison
-10. Perform risk stratification and mortality rate analysis
-11. Perform survival analysis (Kaplan–Meier, Cox models)
-12. Benchmark against ICU severity scores
+10. Perform population-relative risk stratification
+11. Physiologic Interpretation: Group features according to measurment type and report top contributors to total positive evidence
+12. Perform survival analysis (Kaplan–Meier, Cox models)
+13. Benchmark against ICU severity scores
 
 Engineered Features:  
 Number of measurements, measurement missing indicator, min, max, mean, median, IQR, early mean (before 12h), late mean (after 12h), Number occurrences below safe lower bound for measurement, Number occurrences above safe upper bound for measurement, Number in low/med/high bins, Measurement entropy using counts in low/med/high bins, Fraction of occurrences below safe lower bound, and Fraction of occurrences above safe upper bound  
