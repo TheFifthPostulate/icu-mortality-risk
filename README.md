@@ -30,7 +30,7 @@ Analytical pipeline:
 8. Construct population-relative risk metric (d_dist)
 9. Train Random Forest model for predictive comparison
 10. Perform population-relative risk stratification
-11. Physiologic Interpretation: Group features according to measurment type and report top contributors to total positive evidence
+11. **Physiologic Interpretation:** Group features according to measurment type and report top contributors to total positive evidence
 12. Perform survival analysis (Kaplan–Meier, Cox models)
 13. Benchmark against ICU severity scores
 
