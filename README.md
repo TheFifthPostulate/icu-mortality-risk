@@ -59,7 +59,7 @@ Methods used:
 
 #### AUROC
 
-**Random Forest: 0.8857**
+**Random Forest: 0.8857**  
 **d_dist : 0.8476**
   
 ### d_dist vs Mortality Rate
