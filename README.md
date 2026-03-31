@@ -57,6 +57,10 @@ Methods used:
 #### Density plot of Random Forest Probability of mortality
 ![Density plot of Random Forest Probability of mortality](plots/rf_dens_val.png)  
 
+#### AUROC
+
+**Random Forest: 0.8857**
+**d_dist : 0.8476**
   
 ### d_dist vs Mortality Rate
 
