@@ -57,7 +57,7 @@ Methods used:
 #### Density plot of Random Forest Probability of mortality
 ![Density plot of Random Forest Probability of mortality](plots/rf_dens_val.png)  
 
-#### AUROC and AUPRC
+### AUROC and AUPRC
 
 ![AUROC and AUPRC](plots/auroc_auprc.png)  
   
