@@ -135,8 +135,9 @@ Measurement Groups were created by adding positive evidence (log-likelihood rati
  
 ## Key Takeaways
 - Population-relative risk score d_dist strongly stratifies mortality risk
-- Survival models based on interpretable risk features perform comparably or better than ICU severity scores
+- Evidence-based scores (d_dist and pos_sum) achieved comparable or slightly higher AUPRC than random forest probability
 - Risk can be directly decomposed into physiologic drivers and feature-level contributions
+- Survival models based on interpretable risk features perform comparably or better than ICU severity scores
 
 ## Future Work
   
